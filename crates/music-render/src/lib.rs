@@ -1,18 +1,18 @@
-//! The Music app's screens, touch handling and playback control. Decoding and the player are in `music-audio`; the
-//! queue, the time text and the saved place are in `music-core`.
+//! The Music app's screens and touch handling. The app is a remote for the player: the player runs apart from the app
+//! (see `music-kindle`), so music keeps playing when the app closes, as on an Apple device. The app sends commands and
+//! reads the player's status.
 //!
 //! The layout follows Apple Music: a large title over a list of tracks, a mini player above a floating tab bar, and a
 //! full player with a large artwork square, a thin progress line and round transport buttons. The files carry no
-//! artwork, so the square shows a note. Playing needs headphones: the Kindle has no speaker. Sleep pauses playback,
-//! and leaving the app stops it.
+//! artwork, so the square shows a note. Playing needs headphones: the Kindle has no speaker. Sleep pauses playback.
+//! Exit leaves the app and music goes on; Stop ends playback.
 
-use std::io;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-use music_audio::{duration, Event, Playback};
-use music_core::{format_time, PlayState, Queue, Saved, Track};
-use primitive_app::{save, App, Change};
+use music_audio::duration;
+use music_core::{format_time, Command, PlayState, Snapshot, Track};
+use primitive_app::{App, Change};
 use primitive_ui::{
     back_button, full_screen_message, screen_rect, Canvas, Icon, Input, Rect, Tab, TabBar, TextStyle,
     BLACK, CAPTION, HAIRLINE, PAPER,
@@ -20,18 +20,26 @@ use primitive_ui::{
 
 /// Tracks on one library page.
 pub const PER_PAGE: usize = 7;
-/// How often the screen shows a new position while playing, in seconds.
-const SHOWN_EVERY: u64 = 5;
+/// How often the status is read (the screen redraws only when it changed).
+const WAKE_EVERY: Duration = Duration::from_secs(1);
 /// How often the headphones are checked.
 const CHECK_EVERY: Duration = Duration::from_secs(5);
-/// How often the player is polled while a track plays.
-const POLL_EVERY: Duration = Duration::from_secs(1);
+/// How often the screen shows a new position while playing, in seconds.
+const SHOWN_EVERY: u64 = 5;
 /// The grey of the artwork's background and of the note on it.
 const ARTWORK: u8 = 235;
 const NOTE_INK: u8 = 120;
 
 /// The headphones' name (the Bluetooth device's name), or `None` when none is connected.
 pub type Headphones = Box<dyn Fn() -> Option<String>>;
+
+/// The player, as the app sees it.
+pub trait Remote {
+    /// The player's state now (also the saved place when no player runs).
+    fn snapshot(&self) -> Snapshot;
+    /// Send a command to the player (starting it for `Play`).
+    fn send(&mut self, command: Command) -> Result<(), String>;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -80,9 +88,14 @@ fn tabs_rect(width: i32) -> Rect {
     screen_rect(width, 40, 1500, 1184, 120)
 }
 
-fn tabs(selected: usize) -> TabBar<'static> {
+/// The Stop control at the top left of the player.
+fn stop_rect(width: i32) -> Rect {
+    screen_rect(width, 40, 40, 240, 80)
+}
+
+fn tab_bar(bounds: Rect, selected: usize) -> TabBar<'static> {
     TabBar {
-        bounds: Rect::new(0, 0, 0, 0),
+        bounds,
         tabs: &[Tab { label: "Library", icon: Some(NOTE) }, Tab { label: "Playing", icon: Some(PLAY) }],
         selected,
     }
@@ -110,138 +123,123 @@ impl NowLayout {
     }
 }
 
+/// What the screen shows: when it changes, the screen redraws.
+#[derive(Debug, PartialEq, Eq)]
+struct View {
+    state: PlayState,
+    index: Option<usize>,
+    shown: u64,
+    message: Option<String>,
+    device: Option<String>,
+}
+
 pub struct Music {
-    queue: Queue,
-    playback: Playback,
+    tracks: Vec<Track>,
+    remote: Box<dyn Remote>,
+    snapshot: Snapshot,
+    /// The current track's length in seconds, when its header says.
+    length: Option<u64>,
+    length_of: Option<usize>,
     headphones: Headphones,
     device: Option<String>,
     checked_at: Instant,
     wake_at: Instant,
     screen: Screen,
     page: usize,
-    /// The track's length in seconds, when its header says.
-    length: Option<u64>,
-    /// Where playback resumes (while stopped or paused).
-    resume_at: u64,
-    /// The position last shown, in steps of `SHOWN_EVERY` seconds.
-    shown: u64,
-    message: Option<String>,
-    state_file: Option<PathBuf>,
-    saved: Saved,
-    /// A track has been chosen (or restored from the saved place): the mini player and the Playing tab use it.
-    chosen: bool,
+    /// A message from the app itself, such as "Connect headphones first." (the player's messages come in the status).
+    notice: Option<String>,
 }
 
 impl Music {
-    /// `tracks` is the library in list order. `saved` is the place from the last visit: its track is selected, paused.
-    pub fn new(
-        tracks: Vec<Track>,
-        saved: Saved,
-        playback: Playback,
-        headphones: Headphones,
-        state_file: Option<PathBuf>,
-    ) -> Self {
-        let queue = Queue::new(tracks);
-        let index = saved.index_in(queue.tracks());
+    pub fn new(tracks: Vec<Track>, remote: Box<dyn Remote>, headphones: Headphones) -> Self {
         let now = Instant::now();
+        let snapshot = remote.snapshot();
         let mut app = Self {
-            queue,
-            playback,
+            tracks,
+            remote,
+            snapshot,
+            length: None,
+            length_of: None,
             headphones,
             device: None,
             checked_at: now,
             wake_at: now,
             screen: Screen::Library,
             page: 0,
-            length: None,
-            resume_at: 0,
-            shown: 0,
-            message: None,
-            state_file,
-            saved,
-            chosen: false,
+            notice: None,
         };
         app.device = (app.headphones)();
-        if let Some(index) = index {
-            app.queue.select(index);
-            app.resume_at = app.saved.position;
-            app.length = app.current_length();
+        if let Some(index) = app.snapshot.index {
             app.page = index / PER_PAGE;
-            app.chosen = true;
         }
+        app.refresh_length();
         app
-    }
-
-    pub fn queue(&self) -> &Queue {
-        &self.queue
     }
 
     pub fn screen(&self) -> Screen {
         self.screen
     }
 
+    pub fn show_now(&mut self) {
+        self.screen = Screen::Now;
+    }
+
     pub fn page(&self) -> usize {
         self.page
     }
 
-    pub fn position(&self) -> u64 {
-        if self.playback.is_playing() {
-            self.playback.position()
-        } else {
-            self.resume_at
-        }
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
     }
 
     pub fn headphones(&self) -> Option<&str> {
         self.device.as_deref()
     }
 
-    /// Show track `index` paused at `position` seconds, without playing (for previews and tests).
-    pub fn show_paused_at(&mut self, index: usize, position: u64) {
-        self.queue.select(index);
-        self.queue.play(index);
-        self.queue.pause();
-        self.resume_at = position;
-        self.length = self.current_length();
-        self.chosen = true;
-        self.screen = Screen::Now;
+    fn refresh(&mut self) {
+        self.snapshot = self.remote.snapshot();
+        self.refresh_length();
     }
 
-    fn current_length(&self) -> Option<u64> {
-        self.queue.current().and_then(|track| duration(&track.path))
+    fn refresh_length(&mut self) {
+        let index = self.snapshot.index.filter(|&i| i < self.tracks.len());
+        if self.length_of != index {
+            self.length_of = index;
+            self.length = index.and_then(|i| duration(&self.tracks[i].path));
+        }
+    }
+
+    fn current(&self) -> Option<&Track> {
+        self.snapshot.index.and_then(|index| self.tracks.get(index))
+    }
+
+    fn playing(&self) -> bool {
+        self.snapshot.state == PlayState::Playing
+    }
+
+    /// The mini player shows while something plays or is paused.
+    fn shows_mini(&self) -> bool {
+        self.snapshot.state != PlayState::Stopped && self.current().is_some()
     }
 
     fn page_count(&self) -> usize {
-        self.queue.tracks().len().div_ceil(PER_PAGE).max(1)
+        self.tracks.len().div_ceil(PER_PAGE).max(1)
     }
 
-    /// The tracks on the current page, with their details.
-    fn page_rows(&self) -> Vec<(String, String)> {
-        let start = self.page * PER_PAGE;
-        self.queue
-            .tracks()
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(PER_PAGE)
-            .map(|(index, track)| (track.title.clone(), self.row_detail(index, track)))
-            .collect()
+    fn is_current(&self, index: usize) -> bool {
+        self.snapshot.index == Some(index) && self.snapshot.state != PlayState::Stopped
     }
 
     fn row_detail(&self, index: usize, track: &Track) -> String {
         let format = format_label(track);
         if self.is_current(index) {
-            let state = if self.queue.state() == PlayState::Playing { "Playing" } else { "Paused" };
+            let state = if self.playing() { "Playing" } else { "Paused" };
             format!("{format} · {state}")
-        } else if self.saved.index_in(self.queue.tracks()) == Some(index) {
+        } else if self.snapshot.index == Some(index) {
             format!("{format} · Last played")
         } else {
             format
         }
-    }
-
-    fn is_current(&self, index: usize) -> bool {
-        self.queue.current_index() == index && self.queue.state() != PlayState::Stopped
     }
 
     fn connection_line(&self) -> String {
@@ -251,79 +249,46 @@ impl Music {
         }
     }
 
-    /// Open a track from the library and start it.
-    fn open(&mut self, index: usize) -> Change {
-        self.queue.select(index);
-        self.chosen = true;
-        self.resume_at = match self.saved.index_in(self.queue.tracks()) {
-            Some(saved) if saved == index => self.saved.position,
-            _ => 0,
-        };
-        self.length = self.current_length();
-        self.screen = Screen::Now;
-        self.start(self.resume_at);
-        Change::Full
+    fn message(&self) -> Option<String> {
+        self.notice.clone().or_else(|| self.snapshot.message.clone())
     }
 
-    /// Start the current track at `from` seconds, if headphones are connected.
-    fn start(&mut self, from: u64) {
-        let Some(track) = self.queue.current().cloned() else {
-            return;
-        };
+    fn send(&mut self, command: Command) -> Change {
+        self.notice = self.remote.send(command).err();
+        self.refresh();
+        Change::Partial
+    }
+
+    /// Play track `index` from `from` seconds, if headphones are connected.
+    fn play_track(&mut self, index: usize, from: u64) -> Change {
         if self.device.is_none() {
-            self.queue.stop();
-            self.message = Some("Connect headphones in Settings › Bluetooth first.".into());
-            return;
+            self.notice = Some("Connect headphones in Settings › Bluetooth first.".into());
+            return Change::Partial;
         }
-        match self.playback.start_at(&track.path, from) {
-            Ok(()) => {
-                if self.queue.state() != PlayState::Playing {
-                    self.queue.play(self.queue.current_index());
-                }
-                self.resume_at = from;
-                self.shown = from / SHOWN_EVERY;
-                self.message = None;
-                self.wake_at = Instant::now() + POLL_EVERY;
-            }
-            Err(error) => {
-                self.queue.stop();
-                self.message = Some(error);
-            }
-        }
+        self.send(Command::Play { index, from })
     }
 
-    fn pause(&mut self) {
-        if self.playback.is_playing() {
-            self.resume_at = self.playback.stop();
-        }
-        self.queue.pause();
-    }
-
+    /// Pause, or resume the chosen track from its place.
     fn toggle(&mut self) -> Change {
-        if self.playback.is_playing() {
-            self.pause();
+        if self.playing() {
+            self.send(Command::Pause)
+        } else if let Some(index) = self.snapshot.index {
+            self.play_track(index, self.snapshot.position)
         } else {
-            self.start(self.resume_at);
+            Change::None
         }
-        Change::Partial
     }
 
-    fn move_track(&mut self, forward: bool) -> Change {
-        let was_playing = self.playback.is_playing();
-        self.playback.stop();
-        if forward {
-            self.queue.next();
-        } else {
-            self.queue.previous();
+    /// A row tap: the current track pauses or resumes; another track plays (a stopped last-played track resumes from its
+    /// place).
+    fn open_row(&mut self, index: usize) -> Change {
+        self.screen = Screen::Now;
+        if self.is_current(index) {
+            return self.toggle();
         }
-        self.resume_at = 0;
-        self.length = self.current_length();
-        if was_playing {
-            self.start(0);
-        } else {
-            self.queue.stop();
-        }
-        Change::Partial
+        let from = if self.snapshot.index == Some(index) { self.snapshot.position } else { 0 };
+        self.play_track(index, from);
+        Change::Full
     }
 
     fn seek(&mut self, fraction: f32) -> Change {
@@ -331,12 +296,17 @@ impl Music {
             return Change::None;
         };
         let target = (length as f32 * fraction.clamp(0.0, 1.0)) as u64;
-        if self.playback.is_playing() {
-            self.start(target);
-        } else {
-            self.resume_at = target;
+        self.send(Command::Seek(target))
+    }
+
+    fn view(&self) -> View {
+        View {
+            state: self.snapshot.state,
+            index: self.snapshot.index,
+            shown: self.snapshot.position / SHOWN_EVERY,
+            message: self.message(),
+            device: self.device.clone(),
         }
-        Change::Partial
     }
 
     fn draw_library(&self, canvas: &mut Canvas) {
@@ -345,25 +315,29 @@ impl Music {
         canvas.button(back_button(width), "Exit", true, false);
         canvas.text(screen_rect(width, 40, 176, 1184, 60), &self.connection_line(), CAPTION);
 
-        if self.queue.tracks().is_empty() {
+        if self.tracks.is_empty() {
             full_screen_message(
                 canvas,
                 "No music yet",
                 "Copy music files to /mnt/us/music or to /mnt/us/music/library, then open Music again.",
             );
         }
-        for (index, (title, detail)) in self.page_rows().iter().enumerate() {
-            draw_track_row(canvas, row_rect(width, index), title, detail, self.is_current(self.page * PER_PAGE + index));
+        let start = self.page * PER_PAGE;
+        let end = self.tracks.len().min(start + PER_PAGE);
+        for (position, index) in (start..end).enumerate() {
+            let track = &self.tracks[index];
+            let detail = self.row_detail(index, track);
+            draw_track_row(canvas, row_rect(width, position), &track.title, &detail, self.is_current(index));
         }
         if self.page_count() > 1 {
             self.draw_pager(canvas, width);
         }
-        if self.chosen {
-            if let Some(track) = self.queue.current() {
+        if self.shows_mini() {
+            if let Some(track) = self.current() {
                 self.draw_mini_player(canvas, width, &track.title);
             }
         }
-        draw_tabs(canvas, width, 0);
+        tab_bar(tabs_rect(width), 0).draw(canvas, None);
     }
 
     fn draw_pager(&self, canvas: &mut Canvas, width: i32) {
@@ -392,33 +366,30 @@ impl Music {
             &self.connection_line(),
             CAPTION,
         );
-        let symbol = if self.playback.is_playing() { PAUSE } else { PLAY };
+        let symbol = if self.playing() { PAUSE } else { PLAY };
         round_control(canvas, mini_button(width), symbol, true);
     }
 
     fn draw_now(&self, canvas: &mut Canvas) {
         let width = canvas.bounds().w;
         let layout = NowLayout::new(width);
-        let Some(track) = self.queue.current().filter(|_| self.chosen) else {
+        text_control(canvas, stop_rect(width), "Stop", TextStyle::new(38).bold());
+        let Some(track) = self.current() else {
             full_screen_message(canvas, "Nothing playing", "Choose a track in the library.");
-            draw_tabs(canvas, width, 1);
+            tab_bar(tabs_rect(width), 1).draw(canvas, None);
             return;
         };
 
         canvas.panel(layout.artwork, 24, 3, ARTWORK);
         canvas.icon(layout.artwork.inset(layout.artwork.w / 3), NOTE, NOTE_INK);
 
-        let position = self.position();
+        let position = self.snapshot.position;
         let shown = self.length.map_or(position, |length| position.min(length));
         canvas.text(screen_rect(width, 40, 950, 1184, 100), &track.title, TextStyle::new(58).bold().lines(1));
+        let index = self.snapshot.index.unwrap_or(0) + 1;
         canvas.text(
             screen_rect(width, 40, 1036, 1184, 50),
-            &format!(
-                "{} · {} of {}",
-                format_label(track),
-                self.queue.current_index() + 1,
-                self.queue.tracks().len()
-            ),
+            &format!("{} · {} of {}", format_label(track), index, self.tracks.len()),
             CAPTION,
         );
 
@@ -435,32 +406,35 @@ impl Music {
         }
 
         round_control(canvas, layout.previous, PREVIOUS, false);
-        let playing = self.playback.is_playing();
-        round_control(canvas, layout.play, if playing { PAUSE } else { PLAY }, true);
+        let symbol = if self.playing() { PAUSE } else { PLAY };
+        round_control(canvas, layout.play, symbol, true);
         round_control(canvas, layout.next, NEXT, false);
 
-        let detail = self.message.clone().unwrap_or_else(|| match self.queue.state() {
+        let detail = self.message().unwrap_or_else(|| match self.snapshot.state {
             PlayState::Playing => self.connection_line(),
             PlayState::Paused => "Paused".into(),
             PlayState::Stopped => "Stopped".into(),
         });
         canvas.text(screen_rect(width, 40, 1424, 1184, 60), &detail, CAPTION.center());
-        draw_tabs(canvas, width, 1);
+        tab_bar(tabs_rect(width), 1).draw(canvas, None);
     }
 
     fn library_hit(&mut self, x: f32, y: f32, width: i32) -> Change {
         if back_button(width).contains(x, y) {
+            // Leaving keeps the music going: the player is separate from this screen.
             return Change::Exit;
         }
-        if self.chosen && mini_rect(width).contains(x, y) {
+        if self.shows_mini() && mini_rect(width).contains(x, y) {
             if mini_button(width).contains(x, y) {
                 return self.toggle();
             }
             self.screen = Screen::Now;
             return Change::Full;
         }
-        if let Some(index) = (0..self.page_rows().len()).find(|&index| row_rect(width, index).contains(x, y)) {
-            return self.open(self.page * PER_PAGE + index);
+        let start = self.page * PER_PAGE;
+        let visible = self.tracks.len().saturating_sub(start).min(PER_PAGE);
+        if let Some(position) = (0..visible).find(|&position| row_rect(width, position).contains(x, y)) {
+            return self.open_row(start + position);
         }
         if self.page > 0 && pager_previous(width).contains(x, y) {
             self.page -= 1;
@@ -474,15 +448,18 @@ impl Music {
     }
 
     fn now_hit(&mut self, x: f32, y: f32, width: i32) -> Change {
+        if stop_rect(width).contains(x, y) {
+            return self.send(Command::Stop);
+        }
         let layout = NowLayout::new(width);
         if layout.previous.contains(x, y) {
-            return self.move_track(false);
+            return self.send(Command::Previous);
         }
         if layout.play.contains(x, y) {
             return self.toggle();
         }
         if layout.next.contains(x, y) {
-            return self.move_track(true);
+            return self.send(Command::Next);
         }
         if layout.bar_touch.contains(x, y) {
             let fraction = (x - layout.bar.x as f32) / layout.bar.w as f32;
@@ -491,65 +468,28 @@ impl Music {
         self.tab_hit(x, y, width)
     }
 
-    /// A tab bar tap: Library goes to the list, Playing to the player (only once a track is chosen).
+    /// A tab bar tap: Library goes to the list, Playing to the player (once a track is chosen).
     fn tab_hit(&mut self, x: f32, y: f32, width: i32) -> Change {
-        let bar = TabBar { bounds: tabs_rect(width), ..tabs(0) };
-        match bar.hit(x, y) {
+        match tab_bar(tabs_rect(width), 0).hit(x, y) {
             Some(0) if self.screen != Screen::Library => {
                 self.screen = Screen::Library;
                 Change::Full
             }
-            Some(1) if self.screen != Screen::Now && self.chosen => {
+            Some(1) if self.screen != Screen::Now && self.current().is_some() => {
                 self.screen = Screen::Now;
                 Change::Full
             }
             _ => Change::None,
         }
     }
-
-    fn tick_playback(&mut self) -> Change {
-        if !self.playback.is_playing() {
-            return Change::None;
-        }
-        match self.playback.poll() {
-            Event::Playing => {
-                let step = self.position() / SHOWN_EVERY;
-                if step != self.shown {
-                    self.shown = step;
-                    Change::Partial
-                } else {
-                    Change::None
-                }
-            }
-            Event::Ended => {
-                // The track finished: the next one plays, and the list repeats.
-                self.queue.finished();
-                self.resume_at = 0;
-                self.length = self.current_length();
-                self.start(0);
-                Change::Partial
-            }
-            Event::Failed(error) => {
-                self.playback.stop();
-                self.queue.stop();
-                self.message = Some(error);
-                Change::Partial
-            }
-        }
-    }
 }
 
 fn format_label(track: &Track) -> String {
-    track
-        .path
+    Path::new(&track.path)
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_uppercase())
         .unwrap_or_default()
-}
-
-fn draw_tabs(canvas: &mut Canvas, width: i32, selected: usize) {
-    TabBar { bounds: tabs_rect(width), ..tabs(selected) }.draw(canvas, None);
 }
 
 /// A track row: a square with a note, the title and its detail, and a hairline below. A row under the finger turns grey.
@@ -585,7 +525,7 @@ fn round_control(canvas: &mut Canvas, rect: Rect, symbol: Icon, solid: bool) {
     canvas.icon(rect.inset(rect.w / 4), symbol, ink);
 }
 
-/// A text control with no box, such as the pager's Previous and Next. It fills while held.
+/// A text control with no box, such as Previous, Next and Stop. It fills while held.
 fn text_control(canvas: &mut Canvas, rect: Rect, label: &str, style: TextStyle) {
     let pressed = canvas.control_pressed(rect, false);
     if pressed {
@@ -606,8 +546,11 @@ impl App for Music {
         let width = primitive_app::WIDTH as i32;
         match input {
             Input::Sleep => {
-                // The player stops at sleep: the saved place is the position it stopped at.
-                self.pause();
+                // The Kindle's sleep cuts the sound, so playback pauses; the place is kept.
+                if self.playing() {
+                    let _ = self.remote.send(Command::Pause);
+                    self.refresh();
+                }
                 Change::None
             }
             Input::Wake => Change::None,
@@ -637,42 +580,65 @@ impl App for Music {
     }
 
     fn tick(&mut self, now: Instant) -> Change {
-        let mut change = self.tick_playback();
+        let before = self.view();
+        self.refresh();
         if now.duration_since(self.checked_at) >= CHECK_EVERY {
             self.checked_at = now;
-            let device = (self.headphones)();
-            if device != self.device {
-                self.device = device;
-                change = Change::Partial;
-                if self.device.is_none() && self.playback.is_playing() {
-                    self.pause();
-                    self.message = Some("The headphones disconnected, so playback paused.".into());
-                }
-            }
+            self.device = (self.headphones)();
         }
-        self.wake_at = now + if self.playback.is_playing() { POLL_EVERY } else { CHECK_EVERY };
-        change
-    }
-
-    fn save(&mut self) -> io::Result<()> {
-        let Some(path) = &self.state_file else {
-            return Ok(());
-        };
-        let saved = Saved {
-            path: self.queue.current().map(|track| track.path.clone()),
-            position: self.position(),
-        };
-        save(path, saved.to_text().as_bytes())
+        self.wake_at = now + WAKE_EVERY;
+        if self.view() != before {
+            Change::Partial
+        } else {
+            Change::None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
 
     use super::*;
 
     const WIDTH: i32 = primitive_app::WIDTH as i32;
+
+    /// A player that keeps its state in memory and records what it was sent.
+    #[derive(Default)]
+    struct Fake {
+        snapshot: Snapshot,
+        sent: Vec<Command>,
+    }
+
+    struct Shared(Rc<RefCell<Fake>>);
+
+    impl Remote for Shared {
+        fn snapshot(&self) -> Snapshot {
+            self.0.borrow().snapshot.clone()
+        }
+
+        fn send(&mut self, command: Command) -> Result<(), String> {
+            let mut fake = self.0.borrow_mut();
+            match &command {
+                Command::Play { index, from } => {
+                    fake.snapshot.state = PlayState::Playing;
+                    fake.snapshot.index = Some(*index);
+                    fake.snapshot.position = *from;
+                }
+                Command::Pause => {
+                    if fake.snapshot.state == PlayState::Playing {
+                        fake.snapshot.state = PlayState::Paused;
+                    }
+                }
+                Command::Stop => fake.snapshot.state = PlayState::Stopped,
+                _ => {}
+            }
+            fake.sent.push(command);
+            Ok(())
+        }
+    }
 
     fn tracks(count: usize) -> Vec<Track> {
         (0..count)
@@ -683,35 +649,90 @@ mod tests {
             .collect()
     }
 
-    fn app(count: usize, device: Option<&str>, saved: Saved) -> Music {
+    fn app(count: usize, device: Option<&str>, snapshot: Snapshot) -> (Music, Rc<RefCell<Fake>>) {
+        let fake = Rc::new(RefCell::new(Fake { snapshot, sent: Vec::new() }));
         let device = device.map(str::to_string);
-        Music::new(
-            tracks(count),
-            saved,
-            Playback::new("/bin/cat", std::env::temp_dir().join(format!("music-render-test-{}", std::process::id()))),
-            Box::new(move || device.clone()),
-            None,
-        )
+        let mut music = Music::new(tracks(count), Box::new(Shared(fake.clone())), Box::new(move || device.clone()));
+        music.tick(Instant::now());
+        (music, fake)
     }
 
     fn center(rect: Rect) -> Input {
         Input::Tap((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
     }
 
+    fn sent(fake: &Rc<RefCell<Fake>>) -> Vec<Command> {
+        fake.borrow().sent.clone()
+    }
+
     #[test]
-    fn a_row_opens_the_track_and_done_leaves() {
-        let mut music = app(9, Some("AirPods Pro"), Saved::default());
+    fn a_row_plays_the_track_and_opens_the_player() {
+        let (mut music, fake) = app(9, Some("AirPods Pro"), Snapshot::default());
         assert_eq!(music.input(center(row_rect(WIDTH, 0))), Change::Full);
         assert_eq!(music.screen(), Screen::Now);
-        assert_eq!(music.queue().current_index(), 0);
-        assert_eq!(music.input(Input::PageBack), Change::Full, "the hardware back returns to the list");
-        assert_eq!(music.screen(), Screen::Library);
-        assert_eq!(music.input(center(back_button(WIDTH))), Change::Exit, "Exit leaves the app");
+        assert_eq!(sent(&fake), vec![Command::Play { index: 0, from: 0 }]);
+    }
+
+    #[test]
+    fn playing_needs_headphones_and_says_so() {
+        let (mut music, fake) = app(3, None, Snapshot::default());
+        music.input(center(row_rect(WIDTH, 0)));
+        assert!(sent(&fake).is_empty());
+        assert!(music.message().unwrap().contains("Connect headphones"));
+    }
+
+    #[test]
+    fn exit_leaves_the_app_and_the_music_goes_on() {
+        let playing = Snapshot { state: PlayState::Playing, index: Some(2), position: 40, message: None };
+        let (mut music, fake) = app(9, Some("AirPods Pro"), playing);
+        assert_eq!(music.input(center(back_button(WIDTH))), Change::Exit);
+        assert!(sent(&fake).is_empty(), "leaving sends nothing: the player keeps playing");
+    }
+
+    #[test]
+    fn stop_sends_stop_from_the_player_screen() {
+        let playing = Snapshot { state: PlayState::Playing, index: Some(2), position: 40, message: None };
+        let (mut music, fake) = app(9, Some("AirPods Pro"), playing);
+        music.show_now();
+        assert_eq!(music.input(center(stop_rect(WIDTH))), Change::Partial);
+        assert_eq!(sent(&fake), vec![Command::Stop]);
+        assert_eq!(music.snapshot().state, PlayState::Stopped);
+    }
+
+    #[test]
+    fn the_play_button_pauses_then_resumes_from_the_place() {
+        let playing = Snapshot { state: PlayState::Playing, index: Some(2), position: 40, message: None };
+        let (mut music, fake) = app(9, Some("AirPods Pro"), playing);
+        music.show_now();
+        let layout = NowLayout::new(WIDTH);
+        music.input(center(layout.play));
+        assert_eq!(sent(&fake).last(), Some(&Command::Pause));
+        music.input(center(layout.play));
+        assert_eq!(sent(&fake).last(), Some(&Command::Play { index: 2, from: 40 }));
+    }
+
+    #[test]
+    fn a_stopped_last_track_resumes_from_its_place() {
+        let stopped = Snapshot { state: PlayState::Stopped, index: Some(4), position: 42, message: None };
+        let (mut music, fake) = app(9, Some("AirPods Pro"), stopped);
+        assert_eq!(music.page(), 0);
+        music.show_now();
+        music.input(center(NowLayout::new(WIDTH).play));
+        assert_eq!(sent(&fake), vec![Command::Play { index: 4, from: 42 }]);
+    }
+
+    #[test]
+    fn the_mini_player_shows_only_while_music_is_playing_or_paused() {
+        let (music, _) = app(3, Some("AirPods Pro"), Snapshot::default());
+        assert!(!music.shows_mini());
+        let paused = Snapshot { state: PlayState::Paused, index: Some(1), position: 5, message: None };
+        let (music, _) = app(3, Some("AirPods Pro"), paused);
+        assert!(music.shows_mini());
     }
 
     #[test]
     fn the_pager_turns_pages_and_stops_at_the_ends() {
-        let mut music = app(9, Some("AirPods Pro"), Saved::default());
+        let (mut music, _) = app(9, Some("AirPods Pro"), Snapshot::default());
         assert_eq!(music.input(Input::PageBack), Change::None);
         assert_eq!(music.input(center(pager_next(WIDTH))), Change::Partial);
         assert_eq!(music.page(), 1);
@@ -722,78 +743,32 @@ mod tests {
 
     #[test]
     fn the_tab_bar_switches_between_list_and_player() {
-        let mut music = app(3, Some("AirPods Pro"), Saved::default());
+        let (mut music, _) = app(3, Some("AirPods Pro"), Snapshot::default());
         let bar = tabs_rect(WIDTH);
         let playing_tab = Rect::new(bar.x + bar.w * 3 / 4, bar.y, bar.w / 4, bar.h);
         assert_eq!(music.input(center(playing_tab)), Change::None, "no track chosen yet");
-        music.input(center(row_rect(WIDTH, 0)));
-        music.input(Input::PageBack);
+        let (mut music, _) = app(3, Some("AirPods Pro"), Snapshot { index: Some(0), ..Snapshot::default() });
         assert_eq!(music.input(center(playing_tab)), Change::Full);
         assert_eq!(music.screen(), Screen::Now);
     }
 
     #[test]
-    fn the_mini_player_opens_the_player_and_its_button_toggles() {
-        let mut music = app(3, Some("AirPods Pro"), Saved::default());
-        music.show_paused_at(1, 10);
-        music.input(Input::PageBack);
-        assert_eq!(music.screen(), Screen::Library);
-        assert_eq!(music.input(center(mini_button(WIDTH))), Change::Partial, "the button toggles");
-        assert_eq!(music.input(center(mini_rect(WIDTH))), Change::Full, "the rest of the bar opens the player");
-        assert_eq!(music.screen(), Screen::Now);
+    fn sleep_pauses_playing_music() {
+        let playing = Snapshot { state: PlayState::Playing, index: Some(1), position: 9, message: None };
+        let (mut music, fake) = app(3, Some("AirPods Pro"), playing);
+        assert_eq!(music.input(Input::Sleep), Change::None);
+        assert_eq!(sent(&fake), vec![Command::Pause]);
     }
 
     #[test]
-    fn playing_needs_headphones() {
-        let mut music = app(3, None, Saved::default());
-        music.input(center(row_rect(WIDTH, 0)));
-        assert_eq!(music.queue().state(), PlayState::Stopped);
-        assert!(music.message.as_deref().unwrap().contains("Connect headphones"));
-        assert!(!music.playback.is_playing());
-    }
-
-    #[test]
-    fn a_file_that_cannot_be_read_stops_with_a_message() {
-        let mut music = app(3, Some("AirPods Pro"), Saved::default());
-        music.input(center(row_rect(WIDTH, 0)));
-        assert_eq!(music.queue().state(), PlayState::Stopped);
-        assert!(music.message.as_deref().unwrap().contains("could not open"));
-    }
-
-    #[test]
-    fn the_saved_place_selects_its_track_without_playing() {
-        let saved = Saved { path: Some(PathBuf::from("/no/such/music/04.mp3")), position: 42 };
-        let music = app(9, Some("AirPods Pro"), saved);
-        assert_eq!(music.queue().current_index(), 4);
-        assert_eq!(music.queue().state(), PlayState::Stopped);
-        assert_eq!(music.position(), 42);
-        assert_eq!(music.page(), 0);
-    }
-
-    #[test]
-    fn sleep_pauses_and_the_place_is_saved() {
-        let dir = std::env::temp_dir().join(format!("music-render-save-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let state = dir.join("state.txt");
-        let mut music = Music::new(
-            tracks(2),
-            Saved::default(),
-            Playback::new("/bin/cat", dir.join("segments")),
-            Box::new(|| Some("AirPods Pro".into())),
-            Some(state.clone()),
-        );
-        music.show_paused_at(1, 75);
-        music.input(Input::Sleep);
-        music.save().unwrap();
-        let saved = Saved::from_text(&fs::read_to_string(&state).unwrap());
-        assert_eq!(saved, Saved { path: Some(PathBuf::from("/no/such/music/01.mp3")), position: 75 });
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn the_library_shows_seven_tracks_a_page() {
-        let music = app(9, Some("AirPods Pro"), Saved::default());
-        assert_eq!(music.page_rows().len(), PER_PAGE);
-        assert_eq!(music.page_count(), 2);
+    fn the_status_message_reaches_the_screen() {
+        let failed = Snapshot {
+            state: PlayState::Paused,
+            index: Some(1),
+            position: 9,
+            message: Some("The headphones disconnected, so playback paused.".into()),
+        };
+        let (music, _) = app(3, Some("AirPods Pro"), failed);
+        assert!(music.message().unwrap().contains("disconnected"));
     }
 }

@@ -9,3 +9,4 @@ music-core.workspace = true
 music-audio.workspace = true
 music-render.workspace = true
 primitive-app.workspace = true
+libc = "0.2"

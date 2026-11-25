@@ -52,11 +52,102 @@ pub fn format_time(secs: u64) -> String {
 }
 
 /// Whether the queue is playing, paused, or stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlayState {
+    #[default]
     Stopped,
     Playing,
     Paused,
+}
+
+/// A command from the app to the player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Play track `index` of the library, from `from` seconds.
+    Play { index: usize, from: u64 },
+    Pause,
+    /// End playback and save the place. The player exits.
+    Stop,
+    Next,
+    Previous,
+    /// Move to `seconds` in the current track (while paused, it sets the place to resume from).
+    Seek(u64),
+}
+
+impl Command {
+    /// One line of the control file.
+    pub fn to_line(&self) -> String {
+        match self {
+            Command::Play { index, from } => format!("play {index} {from}"),
+            Command::Pause => "pause".into(),
+            Command::Stop => "stop".into(),
+            Command::Next => "next".into(),
+            Command::Previous => "previous".into(),
+            Command::Seek(seconds) => format!("seek {seconds}"),
+        }
+    }
+
+    pub fn from_line(line: &str) -> Option<Self> {
+        let mut parts = line.split_whitespace();
+        match parts.next()? {
+            "play" => Some(Command::Play { index: parts.next()?.parse().ok()?, from: parts.next()?.parse().ok()? }),
+            "pause" => Some(Command::Pause),
+            "stop" => Some(Command::Stop),
+            "next" => Some(Command::Next),
+            "previous" => Some(Command::Previous),
+            "seek" => Some(Command::Seek(parts.next()?.parse().ok()?)),
+            _ => None,
+        }
+    }
+}
+
+/// What the player reports: its state, the track (its library index), the place in seconds, and a message for the
+/// user. Saved as lines of `key value`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Snapshot {
+    pub state: PlayState,
+    pub index: Option<usize>,
+    pub position: u64,
+    pub message: Option<String>,
+}
+
+impl Snapshot {
+    pub fn to_text(&self) -> String {
+        let state = match self.state {
+            PlayState::Playing => "playing",
+            PlayState::Paused => "paused",
+            PlayState::Stopped => "stopped",
+        };
+        let mut out = format!("state {state}\nposition {}\n", self.position);
+        if let Some(index) = self.index {
+            out.push_str(&format!("index {index}\n"));
+        }
+        if let Some(message) = &self.message {
+            out.push_str(&format!("message {}\n", message.replace('\n', " ")));
+        }
+        out
+    }
+
+    pub fn from_text(text: &str) -> Self {
+        let mut snapshot = Snapshot::default();
+        for line in text.lines() {
+            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+            match key {
+                "state" => {
+                    snapshot.state = match value {
+                        "playing" => PlayState::Playing,
+                        "paused" => PlayState::Paused,
+                        _ => PlayState::Stopped,
+                    }
+                }
+                "position" => snapshot.position = value.parse().unwrap_or(0),
+                "index" => snapshot.index = value.parse().ok(),
+                "message" => snapshot.message = (!value.is_empty()).then(|| value.to_string()),
+                _ => {}
+            }
+        }
+        snapshot
+    }
 }
 
 /// The play queue: the tracks in order, the current one, and the state. Playing the last track wraps to the first.
@@ -244,5 +335,35 @@ mod tests {
         assert_eq!(back.index_in(&lib), Some(2));
         assert_eq!(Saved::from_text("").path, None);
         assert_eq!(Saved::from_text("/gone.mp3\n5").index_in(&lib), None, "a track that is gone is not found");
+    }
+
+    #[test]
+    fn commands_round_trip_through_the_control_file() {
+        for command in [
+            Command::Play { index: 4, from: 73 },
+            Command::Pause,
+            Command::Stop,
+            Command::Next,
+            Command::Previous,
+            Command::Seek(12),
+        ] {
+            assert_eq!(Command::from_line(&command.to_line()), Some(command.clone()));
+        }
+        assert_eq!(Command::from_line("jump 3"), None);
+        assert_eq!(Command::from_line(""), None);
+    }
+
+    #[test]
+    fn the_status_round_trips_and_tolerates_missing_parts() {
+        let snapshot = Snapshot {
+            state: PlayState::Paused,
+            index: Some(7),
+            position: 95,
+            message: Some("The headphones disconnected.".into()),
+        };
+        assert_eq!(Snapshot::from_text(&snapshot.to_text()), snapshot);
+        let empty = Snapshot::from_text("");
+        assert_eq!(empty, Snapshot::default());
+        assert_eq!(empty.state, PlayState::Stopped);
     }
 }
