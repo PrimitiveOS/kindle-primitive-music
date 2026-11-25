@@ -1,0 +1,11 @@
+[package]
+name = "music-kindle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+music-core.workspace = true
+music-audio.workspace = true
+music-render.workspace = true
+primitive-app.workspace = true

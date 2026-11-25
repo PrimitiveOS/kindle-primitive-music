@@ -1,0 +1,15 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    permissions:
+      contents: write
+    uses: PrimitiveOS/kindle-primitive-build/.github/workflows/package.yml@6235c4d7327fbcfce74fc68ec06ae3c4f9c4665d
+    with:
+      id: primitive-music
+      dir: music
+      binary-crate: music-kindle
+      docs-licence-file: LICENSE-DOCS
+      sibling-tools-ref: 529e2cb1a038d2af631426821c5ed4d42a68850d

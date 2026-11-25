@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "primitive-music",
+  "dir": "music",
+  "name": "Music",
+  "subtitle": "Play your music through Bluetooth headphones",
+  "developer": {
+    "name": "Primitive AI"
+  },
+  "categories": [
+    "utilities"
+  ],
+  "description": "Plays the music files on your Kindle through connected Bluetooth headphones, with a library and a player.",
+  "repo": "https://github.com/PrimitiveOS/kindle-primitive-music",
+  "licence": "PolyForm-Noncommercial-1.0.0",
+  "source": "hosted",
+  "icon": "icon.png",
+  "changes": {
+    "network": false,
+    "stops_kindle_ui": false,
+    "starts_at_boot": false,
+    "root_filesystem": false,
+    "hooks": false
+  },
+  "versions": []
+}

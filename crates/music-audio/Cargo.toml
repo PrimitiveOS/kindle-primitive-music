@@ -1,0 +1,9 @@
+[package]
+name = "music-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "flac", "vorbis", "wav", "aac", "isomp4", "ogg", "pcm"] }
+libc = "0.2"
