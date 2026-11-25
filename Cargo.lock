@@ -635,6 +635,7 @@ dependencies = [
 name = "music-kindle"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "music-audio",
  "music-core",
  "music-render",
