@@ -26,6 +26,11 @@ Decoding uses [Symphonia](https://github.com/pdeljanov/Symphonia) (MPL-2.0), a p
 ## Build and test
 
     cargo test --workspace --offline
+
+The player test (`crates/music-kindle/tests/player.rs`, macOS only) runs the real player process against silent audio
+with `afplay`: play, pause, resume, next, previous, seek, headphones leaving, and stop. It uses `/var/tmp` for its control
+and status files, and a fake `lipc-hash-prop` for the headphones. `MUSIC_FOLDER`, `MUSIC_PLAYER` and `MUSIC_PROGRAM`
+override the Kindle paths for tests on a computer.
     cargo run -p music-desktop --offline -- build/previews
     cargo zigbuild --release --offline --target armv7-unknown-linux-musleabihf -p music-kindle
 

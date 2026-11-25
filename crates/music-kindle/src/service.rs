@@ -10,21 +10,26 @@ use std::time::{Duration, Instant};
 use music_audio::{Event, Playback};
 use music_core::{Command, PlayState, Queue, Saved, Snapshot, Track};
 
-use crate::remote::{self, CONTROL, PLACE, PLAYER_PID, STATUS};
+use std::path::PathBuf;
+
+use crate::remote::{self, CONTROL, PLAYER_PID, STATUS};
 
 /// Decoded segments are written here (RAM, so the flash storage is not worn).
 pub const SEGMENTS: &str = "/var/tmp/music-segments";
-/// The stock player. It plays a WAV file through the audio manager, to the connected Bluetooth headphones.
-pub const PLAYER: &str = "/usr/bin/mplay";
+/// The stock player, which plays a WAV file through the audio manager to the connected Bluetooth headphones.
+/// `MUSIC_PLAYER` overrides it (for tests on a computer, with `afplay`).
+pub fn player_program() -> String {
+    std::env::var("MUSIC_PLAYER").unwrap_or_else(|_| "/usr/bin/mplay".into())
+}
 /// How long the player waits for its first command before it gives up.
 const FIRST_COMMAND_WITHIN: Duration = Duration::from_secs(5);
 /// How often the headphones are checked while music plays.
 const CHECK_EVERY: Duration = Duration::from_secs(5);
 
-pub fn run(tracks: Vec<Track>) -> Result<(), String> {
+pub fn run(tracks: Vec<Track>, place: PathBuf) -> Result<(), String> {
     fs::write(PLAYER_PID, std::process::id().to_string())
         .map_err(|e| format!("could not start the player: {e}"))?;
-    let mut service = Service::new(tracks);
+    let mut service = Service::new(tracks, place);
     service.serve();
     service.finish();
     Ok(())
@@ -45,6 +50,7 @@ fn read_commands() -> Vec<Command> {
 }
 
 struct Service {
+    place_file: PathBuf,
     queue: Queue,
     playback: Playback,
     /// Whether a track has been chosen; the status then names it.
@@ -61,11 +67,12 @@ struct Service {
 }
 
 impl Service {
-    fn new(tracks: Vec<Track>) -> Self {
+    fn new(tracks: Vec<Track>, place_file: PathBuf) -> Self {
         let now = Instant::now();
         Self {
+            place_file,
             queue: Queue::new(tracks),
-            playback: Playback::new(PLAYER, SEGMENTS),
+            playback: Playback::new(player_program(), SEGMENTS),
             chosen: false,
             started: false,
             state: PlayState::Stopped,
@@ -252,7 +259,7 @@ impl Service {
             path: self.queue.current().map(|track| track.path.clone()),
             position: self.place,
         };
-        let _ = fs::write(PLACE, saved.to_text());
+        let _ = fs::write(&self.place_file, saved.to_text());
     }
 
     fn finish(&mut self) {

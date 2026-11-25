@@ -10,17 +10,18 @@ use music_core::{library, sort_tracks, Track};
 use music_render::Music;
 use remote::FilePlayer;
 
-/// The music folder: loose files here, and in `library/` beside it.
+/// The music folder: loose files here, and in `library/` beside it. `MUSIC_FOLDER` overrides it (for tests on a computer).
 const MUSIC: &str = "/mnt/us/music";
 
 fn main() -> Result<(), String> {
     let player = std::env::args().nth(1).as_deref() == Some("--player");
-    let dir = PathBuf::from(MUSIC);
+    let dir = std::env::var_os("MUSIC_FOLDER").map_or_else(|| PathBuf::from(MUSIC), PathBuf::from);
     let tracks = scan(&dir);
+    let place = dir.join("state.txt");
     if player {
-        return service::run(tracks);
+        return service::run(tracks, place);
     }
-    let app = Music::new(tracks.clone(), Box::new(FilePlayer::new(tracks)), Box::new(remote::headphones));
+    let app = Music::new(tracks.clone(), Box::new(FilePlayer::new(tracks, place)), Box::new(remote::headphones));
     primitive_app::run(app, &dir)
 }
 
