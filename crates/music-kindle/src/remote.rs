@@ -19,6 +19,9 @@ pub fn program() -> String {
 pub const CONTROL: &str = "/var/tmp/music-control";
 /// The player's status, rewritten every second (RAM).
 pub const STATUS: &str = "/var/tmp/music-status";
+/// The media session the launcher's quick settings reads (docs/contracts.md §1.2), and the commands it sends.
+pub const MEDIA_NOW: &str = "/var/tmp/media/music.now";
+pub const MEDIA_CMD: &str = "/var/tmp/media/music.cmd";
 /// The player's process id. Removed when the player exits.
 pub const PLAYER_PID: &str = "/var/tmp/music-player.pid";
 

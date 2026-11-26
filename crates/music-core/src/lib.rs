@@ -70,6 +70,8 @@ pub enum Command {
     Stop,
     Next,
     Previous,
+    /// Play when paused, pause when playing (the launcher's media card sends it).
+    Toggle,
     /// Move to `seconds` in the current track (while paused, it sets the place to resume from).
     Seek(u64),
 }
@@ -83,6 +85,7 @@ impl Command {
             Command::Stop => "stop".into(),
             Command::Next => "next".into(),
             Command::Previous => "previous".into(),
+            Command::Toggle => "toggle".into(),
             Command::Seek(seconds) => format!("seek {seconds}"),
         }
     }
@@ -95,10 +98,19 @@ impl Command {
             "stop" => Some(Command::Stop),
             "next" => Some(Command::Next),
             "previous" => Some(Command::Previous),
+            "toggle" => Some(Command::Toggle),
             "seek" => Some(Command::Seek(parts.next()?.parse().ok()?)),
             _ => None,
         }
     }
+}
+
+/// The media session the app shares with quick settings (docs/contracts.md §1.2): what the launcher shows while the
+/// music plays or is paused. The track title has no line breaks.
+pub fn media_text(playing: bool, title: &str, position: u64, length: u64, pid: u32) -> String {
+    let state = if playing { "playing" } else { "paused" };
+    let title = title.replace('\n', " ");
+    format!("app music\nname Music\nstate {state}\ntitle {title}\nposition {position}\nlength {length}\npid {pid}\n")
 }
 
 /// What the player reports: its state, the track (its library index), the place in seconds, and a message for the
@@ -345,6 +357,7 @@ mod tests {
             Command::Stop,
             Command::Next,
             Command::Previous,
+            Command::Toggle,
             Command::Seek(12),
         ] {
             assert_eq!(Command::from_line(&command.to_line()), Some(command.clone()));
@@ -365,5 +378,12 @@ mod tests {
         let empty = Snapshot::from_text("");
         assert_eq!(empty, Snapshot::default());
         assert_eq!(empty.state, PlayState::Stopped);
+    }
+
+    #[test]
+    fn the_media_session_is_written_in_the_contract_format() {
+        let text = media_text(true, "Evening Bells", 83, 203, 20561);
+        assert_eq!(text, "app music\nname Music\nstate playing\ntitle Evening Bells\nposition 83\nlength 203\npid 20561\n");
+        assert!(media_text(false, "a\nb", 0, 0, 1).contains("state paused\ntitle a b\n"));
     }
 }

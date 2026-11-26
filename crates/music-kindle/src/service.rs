@@ -12,7 +12,7 @@ use music_core::{Command, PlayState, Queue, Saved, Snapshot, Track};
 
 use std::path::PathBuf;
 
-use crate::remote::{self, CONTROL, PLAYER_PID, STATUS};
+use crate::remote::{self, CONTROL, MEDIA_CMD, MEDIA_NOW, PLAYER_PID, STATUS};
 
 /// Decoded segments are written here (RAM, so the flash storage is not worn).
 pub const SEGMENTS: &str = "/var/tmp/music-segments";
@@ -29,19 +29,20 @@ const CHECK_EVERY: Duration = Duration::from_secs(5);
 pub fn run(tracks: Vec<Track>, place: PathBuf) -> Result<(), String> {
     fs::write(PLAYER_PID, std::process::id().to_string())
         .map_err(|e| format!("could not start the player: {e}"))?;
+    let _ = fs::create_dir_all(Path::new(MEDIA_NOW).parent().unwrap_or(Path::new("/var/tmp/media")));
     let mut service = Service::new(tracks, place);
     service.serve();
     service.finish();
     Ok(())
 }
 
-/// Takes the commands the app wrote since the last read. The file is moved first, so the app can append meanwhile.
-fn read_commands() -> Vec<Command> {
-    if !Path::new(CONTROL).exists() {
+/// Takes the commands written to `file` since the last read. The file is moved first, so the writer can append meanwhile.
+fn read_commands(file: &str) -> Vec<Command> {
+    if !Path::new(file).exists() {
         return Vec::new();
     }
-    let work = format!("{CONTROL}.work");
-    if fs::rename(CONTROL, &work).is_err() {
+    let work = format!("{file}.work");
+    if fs::rename(file, &work).is_err() {
         return Vec::new();
     }
     let text = fs::read_to_string(&work).unwrap_or_default();
@@ -60,6 +61,8 @@ struct Service {
     state: PlayState,
     /// The place while stopped or paused, in seconds.
     place: u64,
+    /// The current track's length in seconds (0 when unknown).
+    length: u64,
     message: Option<String>,
     started_at: Instant,
     device_checked: Instant,
@@ -77,6 +80,7 @@ impl Service {
             started: false,
             state: PlayState::Stopped,
             place: 0,
+            length: 0,
             message: None,
             started_at: now,
             device_checked: now,
@@ -107,6 +111,14 @@ impl Service {
         match command {
             Command::Play { index, from } => self.start(index, from),
             Command::Pause => self.pause(),
+            Command::Toggle => {
+                if self.state == PlayState::Playing {
+                    self.pause();
+                } else if self.chosen {
+                    let index = self.queue.current_index();
+                    self.start(index, self.place);
+                }
+            }
             Command::Stop => {
                 self.stop();
                 return false;
@@ -146,6 +158,7 @@ impl Service {
         let Some(path) = self.queue.tracks().get(index).map(|t| t.path.clone()) else {
             return;
         };
+        self.length = music_audio::duration(&path).unwrap_or(0);
         if remote::headphones().is_none() {
             self.message = Some("Connect headphones in Settings › Bluetooth first.".into());
             self.pause();
@@ -218,7 +231,8 @@ impl Service {
     fn serve(&mut self) {
         loop {
             let mut keep_going = true;
-            for command in read_commands() {
+            let commands = read_commands(CONTROL).into_iter().chain(read_commands(MEDIA_CMD));
+            for command in commands {
                 keep_going = self.apply(command);
                 if !keep_going {
                     break;
@@ -249,6 +263,27 @@ impl Service {
         if fs::write(&temporary, self.snapshot().to_text()).is_ok() {
             let _ = fs::rename(&temporary, STATUS);
         }
+        self.write_media();
+    }
+
+    /// The media session while the music plays or is paused; removed when it stops.
+    fn write_media(&self) {
+        if self.state == PlayState::Stopped {
+            let _ = fs::remove_file(MEDIA_NOW);
+            return;
+        }
+        let title = self.queue.current().map(|t| t.title.clone()).unwrap_or_default();
+        let text = music_core::media_text(
+            self.state == PlayState::Playing,
+            &title,
+            self.position(),
+            self.length,
+            std::process::id(),
+        );
+        let temporary = format!("{MEDIA_NOW}.tmp");
+        if fs::write(&temporary, text).is_ok() {
+            let _ = fs::rename(&temporary, MEDIA_NOW);
+        }
     }
 
     fn save_place(&self) {
@@ -263,6 +298,7 @@ impl Service {
     }
 
     fn finish(&mut self) {
+        let _ = fs::remove_file(MEDIA_NOW);
         let _ = fs::remove_file(PLAYER_PID);
         self.write_status();
     }
