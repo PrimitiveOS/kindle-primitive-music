@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Unit tests, clippy and desktop previews
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: .app
+      - name: Check out the PrimitiveOS tools (the app builds against them)
+        uses: actions/checkout@v5
+        with:
+          repository: PrimitiveOS/kindle-primtitive-tools
+          ref: 3364de5
+          path: .deps/tools
+          persist-credentials: false
+      - name: Check out the launcher (its fonts draw the previews)
+        uses: actions/checkout@v5
+        with:
+          repository: PrimitiveOS/kindle-primitive-launcher
+          ref: 2a142ef
+          path: .deps/launcher
+          persist-credentials: false
+      # The app is in .app, so ../doannt-kindle-* from it is the workspace root.
+      - name: Place the sibling checkouts where the app expects them
+        run: |
+          ln -sfn "$GITHUB_WORKSPACE/.deps/tools" "$GITHUB_WORKSPACE/doannt-kindle-tools"
+          ln -sfn "$GITHUB_WORKSPACE/.deps/launcher" "$GITHUB_WORKSPACE/doannt-kindle-launcher"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .app
+      - name: Unit tests
+        working-directory: .app
+        run: cargo test --locked --workspace
+      - name: Clippy
+        working-directory: .app
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Desktop previews
+        working-directory: .app
+        run: cargo run --locked --release -p music-desktop -- build/previews
+      - name: Keep the previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-previews
+          path: .app/build/previews
