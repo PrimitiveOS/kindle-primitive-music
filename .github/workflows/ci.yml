@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Unit tests, clippy and the player test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: kindle-primitive-music
+      - name: Check out the tools this app builds against
+        uses: actions/checkout@v5
+        with:
+          repository: PrimitiveOS/kindle-primtitive-tools
+          ref: 3364de5
+          path: kindle-primtitive-tools
+          persist-credentials: false
+      - name: Place the tools beside the app
+        run: ln -s "$GITHUB_WORKSPACE/kindle-primtitive-tools" "$GITHUB_WORKSPACE/doannt-kindle-tools"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kindle-primitive-music
+      - name: Unit tests and the player test (macOS only, skipped here)
+        working-directory: kindle-primitive-music
+        run: cargo test --locked --workspace
+      - name: Clippy
+        working-directory: kindle-primitive-music
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Desktop previews
+        working-directory: kindle-primitive-music
+        run: cargo run --locked --release -p music-desktop -- build/previews
+      - name: Keep the previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-previews
+          path: kindle-primitive-music/build/previews
