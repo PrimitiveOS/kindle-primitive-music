@@ -4,5 +4,7 @@
 
 - First version. Library of music files in `/mnt/us/music` and `/mnt/us/music/library`, seven tracks a page.
 - Player: MP3, FLAC, Ogg Vorbis, WAV, M4A and AAC through the Kindle's `mplay`, to connected Bluetooth headphones.
-- Pause, resume, previous, next, and seeking by tapping the progress line. Sleep pauses. Exit stops playback.
-- The place is saved on exit and on sleep, and is offered again on the next open (paused).
+- The player runs apart from the app: Exit leaves the app and the music keeps playing. Reopening Music shows what is
+  playing. Stop ends playback and saves the place.
+- Pause, resume, previous, next, and seeking by tapping the progress line. Sleep pauses while the app is open.
+- Headphones are read from the Bluetooth connected list; when they leave, playback pauses with a message.

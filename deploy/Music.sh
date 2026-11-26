@@ -3,6 +3,7 @@
 # Author: Primitive AI
 # DontUseFBInk
 # PrimitiveUSBLease
+# Wake: redraw
 
 app=/mnt/us/music/bin/music-kindle
 [ -x "$app" ] || exit 1
