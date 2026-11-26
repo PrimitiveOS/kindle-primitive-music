@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "music-audio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "symphonia",
@@ -618,11 +618,11 @@ dependencies = [
 
 [[package]]
 name = "music-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "music-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "music-audio",
  "music-core",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "music-kindle"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "music-audio",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "music-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "music-audio",
  "music-core",

@@ -18,14 +18,14 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: PrimitiveOS/kindle-primtitive-tools
-          ref: 3364de5
+          ref: 3364de558b242aa2f435ea55b248c8b89f248957
           path: .deps/tools
           persist-credentials: false
       - name: Check out the launcher (its fonts draw the previews)
         uses: actions/checkout@v5
         with:
           repository: PrimitiveOS/kindle-primitive-launcher
-          ref: 2a142ef
+          ref: 2a142efbd1512484c50a18125f21ecca08569ce9
           path: .deps/launcher
           persist-credentials: false
       # The app is in .app, so ../doannt-kindle-* from it is the workspace root.
