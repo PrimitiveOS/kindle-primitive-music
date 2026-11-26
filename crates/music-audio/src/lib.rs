@@ -41,11 +41,7 @@ impl Pcm {
     /// The length of the audio in whole seconds.
     pub fn seconds(&self) -> u64 {
         let per_second = u64::from(self.rate) * u64::from(self.channels);
-        if per_second == 0 {
-            0
-        } else {
-            self.samples.len() as u64 / per_second
-        }
+        self.samples.len().checked_div(per_second as usize).map_or(0, |seconds| seconds as u64)
     }
 
     /// The audio as a 16-bit PCM WAV file, each sample scaled by `gain` (1.0 leaves it as it is).

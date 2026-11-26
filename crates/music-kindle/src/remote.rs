@@ -108,35 +108,6 @@ impl Sound for DeviceSound {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::connected_name_in;
-
-    const ONE_CONNECTED: &str = "Hash Index: 0\n\tbd_name = \"AirPods Pro\"\n\tbd_address = \"AA:BB:CC:DD:EE:01\"\n\tis_paired = (1)\n\tis_connected = (1)\n";
-
-    #[test]
-    fn a_connected_device_is_named_and_one_that_left_is_not() {
-        assert_eq!(connected_name_in(ONE_CONNECTED).as_deref(), Some("AirPods Pro"));
-        assert_eq!(connected_name_in(&ONE_CONNECTED.replace("is_connected = (1)", "is_connected = (0)")), None);
-        assert_eq!(connected_name_in(""), None);
-    }
-
-    #[test]
-    fn the_connected_one_is_found_among_several_devices() {
-        let report = format!("{ONE_CONNECTED}Hash Index: 1\n\tbd_name = \"Speaker\"\n\tis_connected = (0)\n");
-        assert_eq!(connected_name_in(&report).as_deref(), Some("AirPods Pro"));
-    }
-
-    #[test]
-    fn the_volume_file_says_a_level_from_1_to_8_and_missing_means_full() {
-        use super::level_from_text;
-        assert_eq!(level_from_text("4\n"), 4);
-        assert_eq!(level_from_text("9"), 8);
-        assert_eq!(level_from_text("0"), 1);
-        assert_eq!(level_from_text(""), 8, "no file: full volume");
-    }
-}
-
 pub struct FilePlayer {
     tracks: Vec<Track>,
     /// Where playback stopped or paused (in the music folder, so it survives a restart).
@@ -191,5 +162,34 @@ impl Remote for FilePlayer {
             .open(CONTROL)
             .map_err(|e| format!("could not send the command: {e}"))?;
         writeln!(file, "{}", command.to_line()).map_err(|e| format!("could not send the command: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connected_name_in;
+
+    const ONE_CONNECTED: &str = "Hash Index: 0\n\tbd_name = \"AirPods Pro\"\n\tbd_address = \"AA:BB:CC:DD:EE:01\"\n\tis_paired = (1)\n\tis_connected = (1)\n";
+
+    #[test]
+    fn a_connected_device_is_named_and_one_that_left_is_not() {
+        assert_eq!(connected_name_in(ONE_CONNECTED).as_deref(), Some("AirPods Pro"));
+        assert_eq!(connected_name_in(&ONE_CONNECTED.replace("is_connected = (1)", "is_connected = (0)")), None);
+        assert_eq!(connected_name_in(""), None);
+    }
+
+    #[test]
+    fn the_connected_one_is_found_among_several_devices() {
+        let report = format!("{ONE_CONNECTED}Hash Index: 1\n\tbd_name = \"Speaker\"\n\tis_connected = (0)\n");
+        assert_eq!(connected_name_in(&report).as_deref(), Some("AirPods Pro"));
+    }
+
+    #[test]
+    fn the_volume_file_says_a_level_from_1_to_8_and_missing_means_full() {
+        use super::level_from_text;
+        assert_eq!(level_from_text("4\n"), 4);
+        assert_eq!(level_from_text("9"), 8);
+        assert_eq!(level_from_text("0"), 1);
+        assert_eq!(level_from_text(""), 8, "no file: full volume");
     }
 }
