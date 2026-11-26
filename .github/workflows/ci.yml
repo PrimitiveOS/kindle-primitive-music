@@ -8,39 +8,48 @@ on:
 
 jobs:
   test:
-    name: Unit tests, clippy and the player test
+    name: Unit tests, clippy and desktop previews
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
-          path: kindle-primitive-music
-      - name: Check out the tools this app builds against
+          path: .app
+      - name: Check out the PrimitiveOS tools (the app builds against them)
         uses: actions/checkout@v5
         with:
           repository: PrimitiveOS/kindle-primtitive-tools
           ref: 3364de5
-          path: kindle-primtitive-tools
+          path: .deps/tools
           persist-credentials: false
-      - name: Place the tools beside the app
-        run: ln -s "$GITHUB_WORKSPACE/kindle-primtitive-tools" "$GITHUB_WORKSPACE/doannt-kindle-tools"
+      - name: Check out the launcher (its fonts draw the previews)
+        uses: actions/checkout@v5
+        with:
+          repository: PrimitiveOS/kindle-primitive-launcher
+          ref: 2a142ef
+          path: .deps/launcher
+          persist-credentials: false
+      - name: Place the sibling checkouts where the app expects them
+        run: |
+          ln -sfn "$GITHUB_WORKSPACE/.deps/tools" "$GITHUB_WORKSPACE/../doannt-kindle-tools"
+          ln -sfn "$GITHUB_WORKSPACE/.deps/launcher" "$GITHUB_WORKSPACE/../doannt-kindle-launcher"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: kindle-primitive-music
-      - name: Unit tests and the player test (macOS only, skipped here)
-        working-directory: kindle-primitive-music
+          workspaces: .app
+      - name: Unit tests
+        working-directory: .app
         run: cargo test --locked --workspace
       - name: Clippy
-        working-directory: kindle-primitive-music
+        working-directory: .app
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Desktop previews
-        working-directory: kindle-primitive-music
+        working-directory: .app
         run: cargo run --locked --release -p music-desktop -- build/previews
       - name: Keep the previews
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: desktop-previews
-          path: kindle-primitive-music/build/previews
+          path: .app/build/previews
