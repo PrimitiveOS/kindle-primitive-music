@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- The release package builds against the tools commit it names in full (the first 0.1.0 release run could not check it out, so it published nothing).
+
 ## 0.1.0
 
 - First version. Library of music files in `/mnt/us/music` and `/mnt/us/music/library`, seven tracks a page.
