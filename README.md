@@ -177,7 +177,7 @@ docs/                 Device notes and the images
 - 📘 [Install guide](INSTALL.md)
 - 🔬 [Device notes](docs/device-notes.md)
 - 📝 [Changelog](CHANGELOG.md)
-- 🔗 [Media session contract](https://github.com/PrimitiveOS/kindle-primitive/blob/feature/system-architecture/docs/contracts.md) (§1.2): how quick settings shows the media card
+- 🔗 [Media session contract](https://github.com/PrimitiveOS/kindle-primitive/blob/main/docs/contracts.md) (§1.2): how quick settings shows the media card
 
 ## Downloads
 
