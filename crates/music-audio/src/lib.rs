@@ -23,6 +23,12 @@ use symphonia::core::units::Time;
 /// Seconds of audio in one WAV file handed to the player.
 pub const SEGMENT_SECS: u64 = 30;
 
+/// The gain of a sound level (1 quietest to 8 full). The player scales the audio itself, so the level works whatever
+/// the Bluetooth stack does with the speaker level.
+pub fn gain_for_level(level: u8) -> f32 {
+    f32::from(level.clamp(1, 8)) / 8.0
+}
+
 /// Decoded audio: 16-bit interleaved samples.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pcm {
@@ -40,6 +46,19 @@ impl Pcm {
         } else {
             self.samples.len() as u64 / per_second
         }
+    }
+
+    /// The audio as a 16-bit PCM WAV file, each sample scaled by `gain` (1.0 leaves it as it is).
+    pub fn wav_bytes_scaled(&self, gain: f32) -> Vec<u8> {
+        if gain == 1.0 {
+            return self.wav_bytes();
+        }
+        let samples = self
+            .samples
+            .iter()
+            .map(|s| (f32::from(*s) * gain).round().clamp(-32768.0, 32767.0) as i16)
+            .collect();
+        Pcm { rate: self.rate, channels: self.channels, samples }.wav_bytes()
     }
 
     /// The audio as a 16-bit PCM WAV file.
@@ -164,6 +183,8 @@ pub struct Playback {
     queued: Option<(u64, Pcm)>,
     /// Which of the two segment file names is next (the one before may still be read by the player).
     file: usize,
+    /// The gain applied to each segment as it is written (see `gain_for_level`).
+    gain: f32,
 }
 
 impl Playback {
@@ -171,7 +192,12 @@ impl Playback {
     pub fn new(program: impl Into<PathBuf>, dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         let _ = fs::create_dir_all(&dir);
-        Self { program: program.into(), dir, track: None, child: None, started: None, start: 0, queued: None, file: 0 }
+        Self { program: program.into(), dir, track: None, child: None, started: None, start: 0, queued: None, file: 0, gain: 1.0 }
+    }
+
+    /// The gain for the segments written from now on (the playing one is restarted to change it: see `start_at`).
+    pub fn set_gain(&mut self, gain: f32) {
+        self.gain = gain;
     }
 
     pub fn is_playing(&self) -> bool {
@@ -235,7 +261,7 @@ impl Playback {
         self.halt_child();
         let path = self.dir.join(format!("segment-{}.wav", self.file));
         self.file ^= 1;
-        fs::write(&path, pcm.wav_bytes()).map_err(|e| format!("could not write the audio: {e}"))?;
+        fs::write(&path, pcm.wav_bytes_scaled(self.gain)).map_err(|e| format!("could not write the audio: {e}"))?;
         let child = Command::new(&self.program)
             .arg(&path)
             .stdin(Stdio::null())
@@ -371,5 +397,19 @@ mod tests {
         assert_eq!(decode(&path, 1, SEGMENT_SECS).unwrap(), None);
         assert!(decode(&path, 0, SEGMENT_SECS).unwrap().is_some());
         assert!(decode(Path::new("/nonexistent/tone.mp3"), 0, 1).is_err());
+    }
+
+    #[test]
+    fn the_gain_scales_the_samples_and_full_level_is_unchanged() {
+        let pcm = Pcm { rate: 8_000, channels: 1, samples: vec![1000, -1000, 32000] };
+        let half = pcm.wav_bytes_scaled(0.5);
+        assert_eq!(&half[44..], &[500i16.to_le_bytes(), (-500i16).to_le_bytes(), 16000i16.to_le_bytes()].concat()[..]);
+        assert_eq!(pcm.wav_bytes_scaled(1.0), pcm.wav_bytes());
+        assert_eq!(gain_for_level(8), 1.0);
+        assert_eq!(gain_for_level(4), 0.5);
+        assert_eq!(gain_for_level(0), 0.125, "the lowest level is 1");
+        // A loud sample scaled up is clipped, not wrapped.
+        let loud = Pcm { rate: 8_000, channels: 1, samples: vec![30000] }.wav_bytes_scaled(2.0);
+        assert_eq!(&loud[44..], &32767i16.to_le_bytes());
     }
 }

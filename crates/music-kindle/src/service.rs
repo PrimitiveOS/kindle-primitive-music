@@ -7,7 +7,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use music_audio::{Event, Playback};
+use music_audio::{gain_for_level, Event, Playback};
 use music_core::{Command, PlayState, Queue, Saved, Snapshot, Track};
 
 use std::path::PathBuf;
@@ -52,6 +52,9 @@ fn read_commands(file: &str) -> Vec<Command> {
 
 struct Service {
     place_file: PathBuf,
+    /// The media volume (1 to 8) the segments are written with, and when the file was last read.
+    volume: u8,
+    volume_checked: Instant,
     queue: Queue,
     playback: Playback,
     /// Whether a track has been chosen; the status then names it.
@@ -72,10 +75,15 @@ struct Service {
 impl Service {
     fn new(tracks: Vec<Track>, place_file: PathBuf) -> Self {
         let now = Instant::now();
+        let volume = remote::read_volume();
+        let mut playback = Playback::new(player_program(), SEGMENTS);
+        playback.set_gain(gain_for_level(volume));
         Self {
             place_file,
+            volume,
+            volume_checked: now,
             queue: Queue::new(tracks),
-            playback: Playback::new(player_program(), SEGMENTS),
+            playback,
             chosen: false,
             started: false,
             state: PlayState::Stopped,
@@ -218,6 +226,26 @@ impl Service {
         }
     }
 
+    /// The media volume, read each second. A change restarts the playing segment from here with the new gain (a short
+    /// gap); the segments written after it carry the new gain already.
+    fn check_volume(&mut self) {
+        if self.volume_checked.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.volume_checked = Instant::now();
+        let level = remote::read_volume();
+        if level == self.volume {
+            return;
+        }
+        self.volume = level;
+        self.playback.set_gain(gain_for_level(level));
+        if self.state == PlayState::Playing {
+            let index = self.queue.current_index();
+            let from = self.position();
+            self.start(index, from);
+        }
+    }
+
     fn check_headphones(&mut self) {
         if self.state == PlayState::Playing && self.device_checked.elapsed() >= CHECK_EVERY {
             self.device_checked = Instant::now();
@@ -243,6 +271,7 @@ impl Service {
             }
             self.poll();
             self.check_headphones();
+            self.check_volume();
             // Stopped after a command ends the player. Before any command, the player waits briefly for one.
             if self.started && self.state == PlayState::Stopped {
                 break;
