@@ -162,6 +162,7 @@ struct View {
     shown: u64,
     message: Option<String>,
     device: Option<String>,
+    sound: Option<u8>,
 }
 
 pub struct Music {
@@ -360,6 +361,7 @@ impl Music {
             shown: self.snapshot.position / SHOWN_EVERY,
             message: self.message(),
             device: self.device.clone(),
+            sound: self.sound_level,
         }
     }
 
@@ -528,12 +530,14 @@ impl Music {
             let fraction = (x - layout.bar.x as f32) / layout.bar.w as f32;
             return self.seek(fraction);
         }
-        if let Some(level) = self.sound_level {
+        if self.sound_level.is_some() {
+            // The level is read now, not from the last tick: the quick settings may have changed it since.
+            let current = self.sound.level().or(self.sound_level).unwrap_or(1);
             if layout.minus.contains(x, y) {
-                return self.set_sound(level.saturating_sub(1));
+                return self.set_sound(current.saturating_sub(1));
             }
             if layout.plus.contains(x, y) {
-                return self.set_sound(level + 1);
+                return self.set_sound(current + 1);
             }
             if layout.segments.contains(x, y) {
                 if let Some(target) = level_at(&layout, x) {
@@ -661,8 +665,9 @@ impl App for Music {
         if now.duration_since(self.checked_at) >= CHECK_EVERY {
             self.checked_at = now;
             self.device = (self.headphones)();
-            self.refresh_sound();
         }
+        // The level is read every tick (the quick settings can change it too).
+        self.refresh_sound();
         self.wake_at = now + WAKE_EVERY;
         if self.view() != before {
             Change::Partial
@@ -916,5 +921,21 @@ mod tests {
         };
         let (music, _) = app(3, Some("AirPods Pro"), failed);
         assert!(music.message().unwrap().contains("disconnected"));
+    }
+
+    #[test]
+    fn a_level_changed_outside_the_app_shows_on_the_next_tick_and_the_buttons_start_from_it() {
+        let playing = Snapshot { state: PlayState::Playing, index: Some(2), position: 40, message: None };
+        let (mut music, _, sound) = app_with_sound(9, Some("AirPods Pro"), playing, 4);
+        music.show_now();
+        assert_eq!(music.sound_level, Some(4));
+        // The quick settings set the level to the maximum.
+        *sound.borrow_mut() = 8;
+        music.tick(Instant::now());
+        assert_eq!(music.sound_level, Some(8), "the next tick shows it");
+        // "−" starts from 8, not from the 4 the app showed before.
+        let layout = NowLayout::new(WIDTH);
+        music.input(center(layout.minus));
+        assert_eq!(*sound.borrow(), 7);
     }
 }
