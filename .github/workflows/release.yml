@@ -12,4 +12,4 @@ jobs:
       dir: music
       binary-crate: music-kindle
       docs-licence-file: LICENSE-DOCS
-      sibling-tools-ref: 529e2cb1a038d2af631426821c5ed4d42a68850d
+      sibling-tools-ref: 3364de5

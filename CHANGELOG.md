@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0
 
 - First version. Library of music files in `/mnt/us/music` and `/mnt/us/music/library`, seven tracks a page.
 - Player: MP3, FLAC, Ogg Vorbis, WAV, M4A and AAC through the Kindle's `mplay`, to connected Bluetooth headphones.

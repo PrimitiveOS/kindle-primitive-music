@@ -54,7 +54,7 @@ seek, headphones leaving, stop, and the media session.
 
 ## Status
 
-Music 0.1.0 is not released yet. The tests above pass on a computer. On the Kindle Oasis 3 (firmware 5.18.2), Music
+Music 0.1.0 is released. The tests above pass on a computer. On the Kindle Oasis 3 (firmware 5.18.2), Music
 opens from the launcher, its library lists the copied tracks, and playback through the AirPods Pro was heard. Still to
 check on the device: the sound row, the media card, and sound during a segment join. The
 [device notes](docs/device-notes.md) list the checks.
