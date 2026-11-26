@@ -54,7 +54,7 @@ decoder, and then it has to keep playing while the reader is used for something 
 
 ## Quick start
 
-1. **Download** `primitive-music-<version>.zip` from the [latest release](https://github.com/PrimitiveOS/kindle-primitive-music/releases/latest), or open **Store** on the Kindle and find **Music**.
+1. **Download** `primitive-music-<version>.zip` from the [latest release](https://github.com/PrimitiveOS/kindle-primitive-music/releases/latest), or open **Store** on the Kindle and find **Music** once it is listed.
 2. Connect your headphones in **Settings › Bluetooth**.
 3. Copy music files to `/mnt/us/music` (or to `/mnt/us/music/library`) on the Kindle's user storage.
 4. Open **Music** from the Launcher grid, and tap a track.
