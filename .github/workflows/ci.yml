@@ -28,10 +28,11 @@ jobs:
           ref: 2a142ef
           path: .deps/launcher
           persist-credentials: false
+      # The app is in .app, so ../doannt-kindle-* from it is the workspace root.
       - name: Place the sibling checkouts where the app expects them
         run: |
-          ln -sfn "$GITHUB_WORKSPACE/.deps/tools" "$GITHUB_WORKSPACE/../doannt-kindle-tools"
-          ln -sfn "$GITHUB_WORKSPACE/.deps/launcher" "$GITHUB_WORKSPACE/../doannt-kindle-launcher"
+          ln -sfn "$GITHUB_WORKSPACE/.deps/tools" "$GITHUB_WORKSPACE/doannt-kindle-tools"
+          ln -sfn "$GITHUB_WORKSPACE/.deps/launcher" "$GITHUB_WORKSPACE/doannt-kindle-launcher"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
