@@ -32,7 +32,7 @@ Music reads MP3, FLAC, Ogg Vorbis, WAV, M4A and AAC files. Titles come from the 
 The player is a separate process, so the music keeps playing when the app closes. The app is a remote for it.
 Playback uses the Kindle's own player (`mplay`): tracks are decoded in 30-second segments, and the stock audio manager
 sends them to the headphones. The media card follows the media session contract in
-[docs/contracts.md](https://github.com/PrimitiveOS/kindle-primitive/blob/main/docs/contracts.md) §1.2, so other apps
+[docs/contracts.md](https://github.com/PrimitiveOS/kindle-primitive/blob/feature/system-architecture/docs/contracts.md) §1.2, so other apps
 that play audio can show their controls the same way.
 
 ## Build and preview
