@@ -21,6 +21,8 @@ pub const SEGMENTS: &str = "/var/tmp/music-segments";
 pub fn player_program() -> String {
     std::env::var("MUSIC_PLAYER").unwrap_or_else(|_| "/usr/bin/mplay".into())
 }
+/// A volume change applies once the level has stayed the same this long.
+const VOLUME_SETTLE: Duration = Duration::from_millis(500);
 /// How long the player waits for its first command before it gives up.
 const FIRST_COMMAND_WITHIN: Duration = Duration::from_secs(5);
 /// How often the headphones are checked while music plays.
@@ -52,9 +54,10 @@ fn read_commands(file: &str) -> Vec<Command> {
 
 struct Service {
     place_file: PathBuf,
-    /// The media volume (1 to 8) the segments are written with, and when the file was last read.
-    volume: u8,
-    volume_checked: Instant,
+    /// The media volume (1 to 8) the segments are written with: applied once it has settled.
+    volume: VolumeWatch,
+    /// The track whose length is in `length` (read again only when the track changes).
+    length_for: Option<usize>,
     queue: Queue,
     playback: Playback,
     /// Whether a track has been chosen; the status then names it.
@@ -80,8 +83,8 @@ impl Service {
         playback.set_gain(gain_for_level(volume));
         Self {
             place_file,
-            volume,
-            volume_checked: now,
+            volume: VolumeWatch::new(volume, VOLUME_SETTLE),
+            length_for: None,
             queue: Queue::new(tracks),
             playback,
             chosen: false,
@@ -166,7 +169,10 @@ impl Service {
         let Some(path) = self.queue.tracks().get(index).map(|t| t.path.clone()) else {
             return;
         };
-        self.length = music_audio::duration(&path).unwrap_or(0);
+        if self.length_for != Some(index) {
+            self.length = music_audio::duration(&path).unwrap_or(0);
+            self.length_for = Some(index);
+        }
         if remote::headphones().is_none() {
             self.message = Some("Connect headphones in Settings › Bluetooth first.".into());
             self.pause();
@@ -226,18 +232,12 @@ impl Service {
         }
     }
 
-    /// The media volume, read each second. A change restarts the playing segment from here with the new gain (a short
-    /// gap); the segments written after it carry the new gain already.
+    /// The media volume. Once a new level has stayed for `VOLUME_SETTLE` (a burst of taps is one change), the playing
+    /// segment restarts from here with the new gain: the one short gap. Segments written after it carry the gain already.
     fn check_volume(&mut self) {
-        if self.volume_checked.elapsed() < Duration::from_secs(1) {
+        let Some(level) = self.volume.observe(remote::read_volume(), Instant::now()) else {
             return;
-        }
-        self.volume_checked = Instant::now();
-        let level = remote::read_volume();
-        if level == self.volume {
-            return;
-        }
-        self.volume = level;
+        };
         self.playback.set_gain(gain_for_level(level));
         if self.state == PlayState::Playing {
             let index = self.queue.current_index();
@@ -330,5 +330,78 @@ impl Service {
         let _ = fs::remove_file(MEDIA_NOW);
         let _ = fs::remove_file(PLAYER_PID);
         self.write_status();
+    }
+}
+
+/// Watches the media volume file: a new level applies only once it has stayed the same for `settle`, so a burst of
+/// changes costs one restart of the playing segment.
+pub struct VolumeWatch {
+    applied: u8,
+    pending: Option<(u8, Instant)>,
+    settle: Duration,
+}
+
+impl VolumeWatch {
+    pub fn new(applied: u8, settle: Duration) -> Self {
+        Self { applied, pending: None, settle }
+    }
+
+    /// The level read now. Returns the level to apply, once it has been the same for `settle`.
+    pub fn observe(&mut self, level: u8, now: Instant) -> Option<u8> {
+        if level == self.applied {
+            self.pending = None;
+            return None;
+        }
+        match self.pending {
+            Some((pending, since)) if pending == level => {
+                if now.duration_since(since) < self.settle {
+                    return None;
+                }
+                self.pending = None;
+                self.applied = level;
+                Some(level)
+            }
+            _ => {
+                self.pending = Some((level, now));
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn a_change_applies_only_after_it_has_settled() {
+        let start = Instant::now();
+        let ms = |n| start + Duration::from_millis(n);
+        let mut watch = VolumeWatch::new(8, Duration::from_millis(500));
+        assert_eq!(watch.observe(4, ms(0)), None, "first sight starts the wait");
+        assert_eq!(watch.observe(4, ms(200)), None, "not settled yet");
+        assert_eq!(watch.observe(4, ms(500)), Some(4), "settled: apply");
+        assert_eq!(watch.observe(4, ms(900)), None, "nothing to do once applied");
+    }
+
+    #[test]
+    fn a_burst_of_changes_is_one_application() {
+        let start = Instant::now();
+        let ms = |n| start + Duration::from_millis(n);
+        let mut watch = VolumeWatch::new(8, Duration::from_millis(500));
+        assert_eq!(watch.observe(7, ms(0)), None);
+        assert_eq!(watch.observe(6, ms(200)), None, "a new level restarts the wait");
+        assert_eq!(watch.observe(5, ms(400)), None);
+        assert_eq!(watch.observe(5, ms(900)), Some(5), "one change, at the last level");
+    }
+
+    #[test]
+    fn going_back_to_the_applied_level_cancels_the_change() {
+        let start = Instant::now();
+        let ms = |n| start + Duration::from_millis(n);
+        let mut watch = VolumeWatch::new(8, Duration::from_millis(500));
+        assert_eq!(watch.observe(3, ms(0)), None);
+        assert_eq!(watch.observe(8, ms(100)), None, "back where it was: nothing to restart");
+        assert_eq!(watch.observe(8, ms(900)), None);
     }
 }
