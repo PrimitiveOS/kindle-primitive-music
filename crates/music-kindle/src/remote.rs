@@ -5,11 +5,11 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 
 use music_core::{Command, PlayState, Saved, Snapshot, Track};
-use music_render::{Remote, Sound, SOUND_LEVELS};
+use music_render::{Remote, Sound};
 
 /// The installed program, started again as the player. `MUSIC_PROGRAM` overrides it (for tests on a computer).
 pub fn program() -> String {
@@ -69,39 +69,42 @@ pub fn headphones() -> Option<String> {
     connected_name_in(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// The Kindle's sound level: the audio manager's `speakerVolume` (integer). It takes eight levels, 10 to 80 in steps of
-/// 10; writes above 80 read back as 80, and writes below 10 as 10. Level 1 is the quietest.
-pub fn level_from_volume(text: &str) -> Option<u8> {
-    let value: u32 = text.trim().parse().ok()?;
-    Some(((value / 10) as u8).clamp(1, SOUND_LEVELS))
+/// The media volume: a level from 1 (quietest) to 8, in a RAM file. The Music player applies it to the audio, and the
+/// launcher's sound row reads and sets the same file. The stock speaker level is not used: the Bluetooth stack
+/// overrides it while headphones are connected.
+pub const VOLUME: &str = "/var/tmp/media/volume";
+
+/// The level a volume file says (1 to 8). A missing or unreadable file means full volume.
+pub fn level_from_text(text: &str) -> u8 {
+    text.trim().parse::<u8>().map(|level| level.clamp(1, 8)).unwrap_or(8)
 }
 
-pub fn volume_for(level: u8) -> u32 {
-    u32::from(level.clamp(1, SOUND_LEVELS)) * 10
+/// The current level.
+pub fn read_volume() -> u8 {
+    level_from_text(&fs::read_to_string(VOLUME).unwrap_or_default())
 }
 
-/// The Kindle's own sound level, read and set through the audio manager.
+/// Set the level (1 to 8) for the player and the launcher.
+pub fn write_volume(level: u8) -> Result<(), String> {
+    if let Some(folder) = Path::new(VOLUME).parent() {
+        let _ = fs::create_dir_all(folder);
+    }
+    let temporary = format!("{VOLUME}.tmp");
+    fs::write(&temporary, format!("{}\n", level.clamp(1, 8)))
+        .and_then(|_| fs::rename(&temporary, VOLUME))
+        .map_err(|e| format!("could not set the sound: {e}"))
+}
+
+/// The media volume, as the sound row shows it.
 pub struct DeviceSound;
 
 impl Sound for DeviceSound {
     fn level(&self) -> Option<u8> {
-        let output = Process::new("lipc-get-prop")
-            .args(["com.lab126.audiomgrd", "speakerVolume"])
-            .output()
-            .ok()?;
-        level_from_volume(&String::from_utf8_lossy(&output.stdout))
+        Some(read_volume())
     }
 
     fn set_level(&mut self, level: u8) -> Result<(), String> {
-        let status = Process::new("lipc-set-prop")
-            .args(["-i", "com.lab126.audiomgrd", "speakerVolume", &volume_for(level).to_string()])
-            .status()
-            .map_err(|e| format!("could not change the sound: {e}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err("the sound level did not change".into())
-        }
+        write_volume(level)
     }
 }
 
@@ -125,15 +128,12 @@ mod tests {
     }
 
     #[test]
-    fn the_sound_levels_map_to_the_audio_manager_values() {
-        use super::{level_from_volume, volume_for};
-        assert_eq!(volume_for(1), 10);
-        assert_eq!(volume_for(8), 80);
-        assert_eq!(volume_for(0), 10, "the lowest level is 1");
-        assert_eq!(level_from_volume("40\n"), Some(4));
-        assert_eq!(level_from_volume("80"), Some(8));
-        assert_eq!(level_from_volume("3"), Some(1));
-        assert_eq!(level_from_volume(""), None);
+    fn the_volume_file_says_a_level_from_1_to_8_and_missing_means_full() {
+        use super::level_from_text;
+        assert_eq!(level_from_text("4\n"), 4);
+        assert_eq!(level_from_text("9"), 8);
+        assert_eq!(level_from_text("0"), 1);
+        assert_eq!(level_from_text(""), 8, "no file: full volume");
     }
 }
 
