@@ -21,7 +21,12 @@ fn main() -> Result<(), String> {
     if player {
         return service::run(tracks, place);
     }
-    let app = Music::new(tracks.clone(), Box::new(FilePlayer::new(tracks, place)), Box::new(remote::headphones));
+    let app = Music::new(
+        tracks.clone(),
+        Box::new(FilePlayer::new(tracks, place)),
+        Box::new(remote::DeviceSound),
+        Box::new(remote::headphones),
+    );
     primitive_app::run(app, &dir)
 }
 

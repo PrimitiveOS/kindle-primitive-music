@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command as Process, Stdio};
 
 use music_core::{Command, PlayState, Saved, Snapshot, Track};
-use music_render::Remote;
+use music_render::{Remote, Sound, SOUND_LEVELS};
 
 /// The installed program, started again as the player. `MUSIC_PROGRAM` overrides it (for tests on a computer).
 pub fn program() -> String {
@@ -66,6 +66,42 @@ pub fn headphones() -> Option<String> {
     connected_name_in(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// The Kindle's sound level: the audio manager's `speakerVolume` (integer). It takes eight levels, 10 to 80 in steps of
+/// 10; writes above 80 read back as 80, and writes below 10 as 10. Level 1 is the quietest.
+pub fn level_from_volume(text: &str) -> Option<u8> {
+    let value: u32 = text.trim().parse().ok()?;
+    Some(((value / 10) as u8).clamp(1, SOUND_LEVELS))
+}
+
+pub fn volume_for(level: u8) -> u32 {
+    u32::from(level.clamp(1, SOUND_LEVELS)) * 10
+}
+
+/// The Kindle's own sound level, read and set through the audio manager.
+pub struct DeviceSound;
+
+impl Sound for DeviceSound {
+    fn level(&self) -> Option<u8> {
+        let output = Process::new("lipc-get-prop")
+            .args(["com.lab126.audiomgrd", "speakerVolume"])
+            .output()
+            .ok()?;
+        level_from_volume(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn set_level(&mut self, level: u8) -> Result<(), String> {
+        let status = Process::new("lipc-set-prop")
+            .args(["-i", "com.lab126.audiomgrd", "speakerVolume", &volume_for(level).to_string()])
+            .status()
+            .map_err(|e| format!("could not change the sound: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("the sound level did not change".into())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::connected_name_in;
@@ -83,6 +119,18 @@ mod tests {
     fn the_connected_one_is_found_among_several_devices() {
         let report = format!("{ONE_CONNECTED}Hash Index: 1\n\tbd_name = \"Speaker\"\n\tis_connected = (0)\n");
         assert_eq!(connected_name_in(&report).as_deref(), Some("AirPods Pro"));
+    }
+
+    #[test]
+    fn the_sound_levels_map_to_the_audio_manager_values() {
+        use super::{level_from_volume, volume_for};
+        assert_eq!(volume_for(1), 10);
+        assert_eq!(volume_for(8), 80);
+        assert_eq!(volume_for(0), 10, "the lowest level is 1");
+        assert_eq!(level_from_volume("40\n"), Some(4));
+        assert_eq!(level_from_volume("80"), Some(8));
+        assert_eq!(level_from_volume("3"), Some(1));
+        assert_eq!(level_from_volume(""), None);
     }
 }
 

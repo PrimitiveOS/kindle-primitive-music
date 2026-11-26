@@ -33,6 +33,15 @@ const NOTE_INK: u8 = 120;
 /// The headphones' name (the Bluetooth device's name), or `None` when none is connected.
 pub type Headphones = Box<dyn Fn() -> Option<String>>;
 
+/// The sound level of the Kindle's output: 1 (quietest) to `SOUND_LEVELS`. The device sets it; the app shows it.
+pub trait Sound {
+    /// The current level, or `None` when it cannot be read.
+    fn level(&self) -> Option<u8>;
+    fn set_level(&mut self, level: u8) -> Result<(), String>;
+}
+
+pub const SOUND_LEVELS: u8 = 8;
+
 /// The player, as the app sees it.
 pub trait Remote {
     /// The player's state now (also the saved place when no player runs).
@@ -47,6 +56,8 @@ pub enum Screen {
     Now,
 }
 
+const MINUS: Icon = Icon { stroke: &["M5 12 H19"], fill: &[] };
+const PLUS: Icon = Icon { stroke: &["M5 12 H19 M12 5 V19"], fill: &[] };
 const NOTE: Icon = Icon {
     stroke: &["M9 18 V5 L21 3 V16", "M5 18 A3 3 0 1 0 5 18.01", "M17 16 A3 3 0 1 0 17 16.01"],
     fill: &[],
@@ -88,11 +99,6 @@ fn tabs_rect(width: i32) -> Rect {
     screen_rect(width, 40, 1500, 1184, 120)
 }
 
-/// The Stop control at the top left of the player.
-fn stop_rect(width: i32) -> Rect {
-    screen_rect(width, 40, 40, 240, 80)
-}
-
 fn tab_bar(bounds: Rect, selected: usize) -> TabBar<'static> {
     TabBar {
         bounds,
@@ -108,19 +114,44 @@ struct NowLayout {
     previous: Rect,
     play: Rect,
     next: Rect,
+    minus: Rect,
+    plus: Rect,
+    /// The eight level segments between the two buttons (touch area as well).
+    segments: Rect,
 }
 
 impl NowLayout {
     fn new(width: i32) -> Self {
         Self {
             artwork: screen_rect(width, 252, 130, 760, 760),
-            bar: screen_rect(width, 40, 1112, 1184, 12),
-            bar_touch: screen_rect(width, 40, 1080, 1184, 70),
-            previous: screen_rect(width, 300, 1236, 140, 140),
-            play: screen_rect(width, 532, 1206, 200, 200),
-            next: screen_rect(width, 824, 1236, 140, 140),
+            bar: screen_rect(width, 40, 1058, 1184, 12),
+            bar_touch: screen_rect(width, 40, 1030, 1184, 70),
+            previous: screen_rect(width, 300, 1180, 140, 140),
+            play: screen_rect(width, 532, 1150, 200, 200),
+            next: screen_rect(width, 824, 1180, 140, 140),
+            minus: screen_rect(width, 40, 1372, 72, 72),
+            plus: screen_rect(width, 1152, 1372, 72, 72),
+            segments: screen_rect(width, 140, 1372, 972, 72),
         }
     }
+
+    /// The rectangle of level segment `index` (0 to 7), with a small gap between segments.
+    fn segment(&self, width: i32, index: u8) -> Rect {
+        let gap = screen_rect(width, 0, 0, 8, 0).w;
+        let step = self.segments.w / i32::from(SOUND_LEVELS);
+        Rect::new(self.segments.x + step * i32::from(index), self.segments.y, step - gap, self.segments.h)
+    }
+}
+
+/// The level a touch at `x` picks on the segments (1 to `SOUND_LEVELS`), or `None` beside them.
+fn level_at(layout: &NowLayout, x: f32) -> Option<u8> {
+    let left = layout.segments.x as f32;
+    let width = layout.segments.w as f32;
+    if x < left || x >= left + width {
+        return None;
+    }
+    let level = ((x - left) / width * f32::from(SOUND_LEVELS)).floor() as u8 + 1;
+    Some(level.min(SOUND_LEVELS))
 }
 
 /// What the screen shows: when it changes, the screen redraws.
@@ -136,6 +167,9 @@ struct View {
 pub struct Music {
     tracks: Vec<Track>,
     remote: Box<dyn Remote>,
+    sound: Box<dyn Sound>,
+    /// The sound level when headphones are connected (read every few seconds).
+    sound_level: Option<u8>,
     snapshot: Snapshot,
     /// The current track's length in seconds, when its header says.
     length: Option<u64>,
@@ -151,12 +185,14 @@ pub struct Music {
 }
 
 impl Music {
-    pub fn new(tracks: Vec<Track>, remote: Box<dyn Remote>, headphones: Headphones) -> Self {
+    pub fn new(tracks: Vec<Track>, remote: Box<dyn Remote>, sound: Box<dyn Sound>, headphones: Headphones) -> Self {
         let now = Instant::now();
         let snapshot = remote.snapshot();
         let mut app = Self {
             tracks,
             remote,
+            sound,
+            sound_level: None,
             snapshot,
             length: None,
             length_of: None,
@@ -173,6 +209,7 @@ impl Music {
             app.page = index / PER_PAGE;
         }
         app.refresh_length();
+        app.refresh_sound();
         app
     }
 
@@ -199,6 +236,23 @@ impl Music {
     fn refresh(&mut self) {
         self.snapshot = self.remote.snapshot();
         self.refresh_length();
+    }
+
+    /// The sound level is shown only while headphones are connected.
+    fn refresh_sound(&mut self) {
+        self.sound_level = if self.device.is_some() { self.sound.level() } else { None };
+    }
+
+    fn set_sound(&mut self, level: u8) -> Change {
+        let level = level.clamp(1, SOUND_LEVELS);
+        match self.sound.set_level(level) {
+            Ok(()) => {
+                self.sound_level = Some(level);
+                self.notice = None;
+            }
+            Err(error) => self.notice = Some(error),
+        }
+        Change::Partial
     }
 
     fn refresh_length(&mut self) {
@@ -373,7 +427,6 @@ impl Music {
     fn draw_now(&self, canvas: &mut Canvas) {
         let width = canvas.bounds().w;
         let layout = NowLayout::new(width);
-        text_control(canvas, stop_rect(width), "Stop", TextStyle::new(38).bold());
         let Some(track) = self.current() else {
             full_screen_message(canvas, "Nothing playing", "Choose a track in the library.");
             tab_bar(tabs_rect(width), 1).draw(canvas, None);
@@ -385,10 +438,10 @@ impl Music {
 
         let position = self.snapshot.position;
         let shown = self.length.map_or(position, |length| position.min(length));
-        canvas.text(screen_rect(width, 40, 950, 1184, 100), &track.title, TextStyle::new(58).bold().lines(1));
+        canvas.text(screen_rect(width, 40, 912, 1184, 80), &track.title, TextStyle::new(58).bold().lines(1));
         let index = self.snapshot.index.unwrap_or(0) + 1;
         canvas.text(
-            screen_rect(width, 40, 1036, 1184, 50),
+            screen_rect(width, 40, 996, 1184, 50),
             &format!("{} · {} of {}", format_label(track), index, self.tracks.len()),
             CAPTION,
         );
@@ -399,10 +452,10 @@ impl Music {
             let filled = (layout.bar.w as f32 * fraction) as i32;
             canvas.fill(Rect::new(layout.bar.x, layout.bar.y, filled, layout.bar.h), BLACK);
         }
-        canvas.text(screen_rect(width, 40, 1134, 400, 50), &format_time(shown), CAPTION);
+        canvas.text(screen_rect(width, 40, 1078, 400, 50), &format_time(shown), CAPTION);
         if let Some(length) = self.length {
             let remaining = format!("-{}", format_time(length.saturating_sub(shown)));
-            canvas.text(screen_rect(width, 824, 1134, 400, 50), &remaining, CAPTION.right());
+            canvas.text(screen_rect(width, 824, 1078, 400, 50), &remaining, CAPTION.right());
         }
 
         round_control(canvas, layout.previous, PREVIOUS, false);
@@ -410,12 +463,25 @@ impl Music {
         round_control(canvas, layout.play, symbol, true);
         round_control(canvas, layout.next, NEXT, false);
 
+        if let Some(level) = self.sound_level {
+            round_control(canvas, layout.minus, MINUS, false);
+            round_control(canvas, layout.plus, PLUS, false);
+            for index in 0..SOUND_LEVELS {
+                let rect = layout.segment(width, index);
+                if index < level {
+                    canvas.panel(rect, 8, 2, BLACK);
+                } else {
+                    canvas.panel(rect, 8, 2, PAPER);
+                }
+            }
+        }
+
         let detail = self.message().unwrap_or_else(|| match self.snapshot.state {
             PlayState::Playing => self.connection_line(),
             PlayState::Paused => "Paused".into(),
             PlayState::Stopped => "Stopped".into(),
         });
-        canvas.text(screen_rect(width, 40, 1424, 1184, 60), &detail, CAPTION.center());
+        canvas.text(screen_rect(width, 40, 1456, 1184, 40), &detail, CAPTION.center());
         tab_bar(tabs_rect(width), 1).draw(canvas, None);
     }
 
@@ -448,9 +514,6 @@ impl Music {
     }
 
     fn now_hit(&mut self, x: f32, y: f32, width: i32) -> Change {
-        if stop_rect(width).contains(x, y) {
-            return self.send(Command::Stop);
-        }
         let layout = NowLayout::new(width);
         if layout.previous.contains(x, y) {
             return self.send(Command::Previous);
@@ -464,6 +527,19 @@ impl Music {
         if layout.bar_touch.contains(x, y) {
             let fraction = (x - layout.bar.x as f32) / layout.bar.w as f32;
             return self.seek(fraction);
+        }
+        if let Some(level) = self.sound_level {
+            if layout.minus.contains(x, y) {
+                return self.set_sound(level.saturating_sub(1));
+            }
+            if layout.plus.contains(x, y) {
+                return self.set_sound(level + 1);
+            }
+            if layout.segments.contains(x, y) {
+                if let Some(target) = level_at(&layout, x) {
+                    return self.set_sound(target);
+                }
+            }
         }
         self.tab_hit(x, y, width)
     }
@@ -585,6 +661,7 @@ impl App for Music {
         if now.duration_since(self.checked_at) >= CHECK_EVERY {
             self.checked_at = now;
             self.device = (self.headphones)();
+            self.refresh_sound();
         }
         self.wake_at = now + WAKE_EVERY;
         if self.view() != before {
@@ -649,12 +726,42 @@ mod tests {
             .collect()
     }
 
+    /// A sound that keeps its level in memory.
+    struct FakeSound(Rc<RefCell<u8>>);
+
+    impl Sound for FakeSound {
+        fn level(&self) -> Option<u8> {
+            Some(*self.0.borrow())
+        }
+
+        fn set_level(&mut self, level: u8) -> Result<(), String> {
+            *self.0.borrow_mut() = level;
+            Ok(())
+        }
+    }
+
     fn app(count: usize, device: Option<&str>, snapshot: Snapshot) -> (Music, Rc<RefCell<Fake>>) {
-        let fake = Rc::new(RefCell::new(Fake { snapshot, sent: Vec::new() }));
-        let device = device.map(str::to_string);
-        let mut music = Music::new(tracks(count), Box::new(Shared(fake.clone())), Box::new(move || device.clone()));
-        music.tick(Instant::now());
+        let (music, fake, _) = app_with_sound(count, device, snapshot, 4);
         (music, fake)
+    }
+
+    fn app_with_sound(
+        count: usize,
+        device: Option<&str>,
+        snapshot: Snapshot,
+        level: u8,
+    ) -> (Music, Rc<RefCell<Fake>>, Rc<RefCell<u8>>) {
+        let fake = Rc::new(RefCell::new(Fake { snapshot, sent: Vec::new() }));
+        let sound = Rc::new(RefCell::new(level));
+        let device = device.map(str::to_string);
+        let mut music = Music::new(
+            tracks(count),
+            Box::new(Shared(fake.clone())),
+            Box::new(FakeSound(sound.clone())),
+            Box::new(move || device.clone()),
+        );
+        music.tick(Instant::now());
+        (music, fake, sound)
     }
 
     fn center(rect: Rect) -> Input {
@@ -690,13 +797,52 @@ mod tests {
     }
 
     #[test]
-    fn stop_sends_stop_from_the_player_screen() {
+    fn the_player_has_no_stop_button_and_the_top_left_does_nothing() {
         let playing = Snapshot { state: PlayState::Playing, index: Some(2), position: 40, message: None };
         let (mut music, fake) = app(9, Some("AirPods Pro"), playing);
         music.show_now();
-        assert_eq!(music.input(center(stop_rect(WIDTH))), Change::Partial);
-        assert_eq!(sent(&fake), vec![Command::Stop]);
-        assert_eq!(music.snapshot().state, PlayState::Stopped);
+        let top_left = Rect::new(40, 40, 240, 80);
+        assert_eq!(music.input(center(top_left)), Change::None);
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn the_sound_row_shows_only_with_headphones_and_moves_the_level() {
+        let playing = Snapshot { state: PlayState::Playing, index: Some(2), position: 40, message: None };
+        let (mut music, _, sound) = app_with_sound(9, Some("AirPods Pro"), playing.clone(), 4);
+        music.show_now();
+        let layout = NowLayout::new(WIDTH);
+        assert_eq!(music.input(center(layout.plus)), Change::Partial);
+        assert_eq!(*sound.borrow(), 5);
+        music.input(center(layout.minus));
+        music.input(center(layout.minus));
+        assert_eq!(*sound.borrow(), 3);
+        // A tap on the fifth segment sets level 5 (its own segment).
+        let fifth = layout.segment(WIDTH, 4);
+        music.input(center(fifth));
+        assert_eq!(*sound.borrow(), 5);
+        // The ends stop at the limits.
+        for _ in 0..10 {
+            music.input(center(layout.plus));
+        }
+        assert_eq!(*sound.borrow(), SOUND_LEVELS);
+        for _ in 0..10 {
+            music.input(center(layout.minus));
+        }
+        assert_eq!(*sound.borrow(), 1);
+
+        let (mut without, _, _) = app_with_sound(9, None, playing, 4);
+        without.show_now();
+        assert_eq!(without.sound_level, None, "no headphones, no sound row");
+        assert_eq!(without.input(center(NowLayout::new(WIDTH).plus)), Change::None);
+    }
+
+    #[test]
+    fn a_touch_beside_the_segments_picks_no_level() {
+        let layout = NowLayout::new(WIDTH);
+        assert_eq!(level_at(&layout, layout.segments.x as f32 - 5.0), None);
+        assert_eq!(level_at(&layout, layout.segments.x as f32 + 1.0), Some(1));
+        assert_eq!(level_at(&layout, layout.segments.right() as f32 - 1.0), Some(SOUND_LEVELS));
     }
 
     #[test]

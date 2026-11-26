@@ -11,7 +11,7 @@ use std::{
 
 use music_audio::{Event, Playback};
 use music_core::{Command, PlayState, Snapshot, Track};
-use music_render::{Music, Remote};
+use music_render::{Music, Remote, Sound};
 use primitive_app::{font_paths, frame, write_png, App, HEIGHT, WIDTH};
 use primitive_ui::{Canvas, Input};
 
@@ -51,6 +51,20 @@ fn sample_tracks() -> Vec<Track> {
     .collect()
 }
 
+/// A sound level that stays where it is put (for previews).
+struct Quiet(u8);
+
+impl Sound for Quiet {
+    fn level(&self) -> Option<u8> {
+        Some(self.0)
+    }
+
+    fn set_level(&mut self, level: u8) -> Result<(), String> {
+        self.0 = level;
+        Ok(())
+    }
+}
+
 /// A player that shows a fixed status (for previews).
 struct Still(Snapshot);
 
@@ -69,7 +83,7 @@ fn previews(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doannt-kindle-launcher/assets/fonts");
     let mut canvas = Canvas::new(WIDTH, HEIGHT, &font_paths(&fonts))?;
     let headphones = || Box::new(|| Some("AirPods Pro".to_string())) as Box<dyn Fn() -> Option<String>>;
-    let make = |status: Snapshot| Music::new(sample_tracks(), Box::new(Still(status)), headphones());
+    let make = |status: Snapshot| Music::new(sample_tracks(), Box::new(Still(status)), Box::new(Quiet(4)), headphones());
     let playing = |index: usize, position: u64| Snapshot {
         state: PlayState::Playing,
         index: Some(index),
@@ -103,7 +117,7 @@ fn previews(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     now_stopped.show_now();
     write_png(&output.join("now-stopped.png"), WIDTH, HEIGHT, &frame(&now_stopped, &mut canvas, false))?;
 
-    let mut without = Music::new(sample_tracks(), Box::new(Still(Snapshot::default())), Box::new(|| None));
+    let mut without = Music::new(sample_tracks(), Box::new(Still(Snapshot::default())), Box::new(Quiet(4)), Box::new(|| None));
     without.show_now();
     write_png(&output.join("now-no-headphones.png"), WIDTH, HEIGHT, &frame(&without, &mut canvas, false))?;
     println!("wrote previews to {}", output.display());
